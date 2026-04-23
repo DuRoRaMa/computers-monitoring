@@ -22,6 +22,9 @@ router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 class NamePayload(BaseModel):
     name: str
 
+class IndicatorPayload(BaseModel):
+    name: str
+    value_type: str
 
 class ValueTextPayload(BaseModel):
     indicator_id: int
@@ -55,6 +58,29 @@ class DiagnosisValuesPayload(BaseModel):
 def normalize_name(name: str) -> str:
     return name.strip()
 
+def normalize_indicator_type(value_type: str) -> str:
+    value = value_type.strip().lower()
+
+    if value not in {"numeric", "categorical"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Тип показателя должен быть numeric или categorical",
+        )
+
+    return value
+
+def validate_parsed_value_for_indicator(indicator: Indicator, parsed: dict):
+    if indicator.value_type == "numeric" and parsed["value_kind"] != "range":
+        raise HTTPException(
+            status_code=400,
+            detail=f'Для показателя "{indicator.name}" разрешён только диапазон',
+        )
+
+    if indicator.value_type == "categorical" and parsed["value_kind"] != "scalar":
+        raise HTTPException(
+            status_code=400,
+            detail=f'Для показателя "{indicator.name}" разрешено только текстовое значение',
+        )
 
 def float_to_text(value: float | None) -> str:
     if value is None:
@@ -129,14 +155,14 @@ def get_state_characteristic_map(db: Session, diagnosis_id: int) -> dict[int, in
 @router.post("/seed-basic")
 def seed_basic_knowledge(db: Session = Depends(get_db)):
     indicator_names = [
-        "CPU загрузка",
-        "RAM занятость",
-        "CPU температура",
-        "Диск скорость",
-        "Диск заполнение",
-        "Сеть пропускная",
-        "Процессы количество",
-        "Сервисы состояние",
+        ("CPU загрузка", "numeric"),
+        ("RAM занятость", "numeric"),
+        ("CPU температура", "numeric"),
+        ("Диск скорость", "numeric"),
+        ("Диск заполнение", "numeric"),
+        ("Сеть пропускная", "numeric"),
+        ("Процессы количество", "numeric"),
+        ("Сервисы состояние", "categorical"),
     ]
 
     diagnosis_names = [
@@ -151,11 +177,13 @@ def seed_basic_knowledge(db: Session = Depends(get_db)):
         ("Критическое с риском отказа", 4),
     ]
 
-    for name in indicator_names:
+    for name, value_type in indicator_names:
         name = normalize_name(name)
+        value_type = normalize_indicator_type(value_type)
+
         exists = db.query(Indicator).filter(Indicator.name == name).first()
         if not exists:
-            db.add(Indicator(name=name))
+            db.add(Indicator(name=name, value_type=value_type))
 
     for name in diagnosis_names:
         name = normalize_name(name)
@@ -455,24 +483,44 @@ def delete_diagnosis(diagnosis_id: int, db: Session = Depends(get_db)):
 @router.get("/indicators")
 def get_indicators(db: Session = Depends(get_db)):
     rows = db.query(Indicator).order_by(Indicator.id).all()
-    return [{"id": x.id, "name": x.name} for x in rows]
+    return [
+        {
+            "id": x.id,
+            "name": x.name,
+            "value_type": x.value_type,
+        }
+        for x in rows
+    ]
 
 
 @router.post("/indicators")
-def create_indicator(payload: NamePayload, db: Session = Depends(get_db)):
+def create_indicator(payload: IndicatorPayload, db: Session = Depends(get_db)):
     name = normalize_name(payload.name)
+    value_type = normalize_indicator_type(payload.value_type)
+
     if not name:
-        raise HTTPException(status_code=400, detail="Название показателя не может быть пустым")
+        raise HTTPException(
+            status_code=400,
+            detail="Название показателя не может быть пустым",
+        )
 
     exists = db.query(Indicator).filter(Indicator.name == name).first()
     if exists:
-        raise HTTPException(status_code=400, detail="Такой показатель уже существует")
+        raise HTTPException(
+            status_code=400,
+            detail="Такой показатель уже существует",
+        )
 
-    item = Indicator(name=name)
+    item = Indicator(name=name, value_type=value_type)
     db.add(item)
     db.commit()
     db.refresh(item)
-    return {"id": item.id, "name": item.name}
+
+    return {
+        "id": item.id,
+        "name": item.name,
+        "value_type": item.value_type,
+    }
 
 
 @router.delete("/indicators/{indicator_id}")
@@ -575,23 +623,12 @@ def create_possible_value(payload: ValueTextPayload, db: Session = Depends(get_d
         raise HTTPException(status_code=404, detail="Показатель не найден")
 
     parsed = parse_value_text(payload.value_text)
+    validate_parsed_value_for_indicator(indicator, parsed)
 
     item = PossibleValue(
         indicator_id=payload.indicator_id,
         **parsed,
     )
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-
-    return {
-        "id": item.id,
-        "indicator_id": item.indicator_id,
-        "value_text": format_value(
-            item.value_kind, item.min_value, item.max_value,
-            item.min_inclusive, item.max_inclusive, item.scalar_value
-        ),
-    }
 
 
 @router.delete("/possible-values/{value_id}")
@@ -641,23 +678,12 @@ def create_normal_value(payload: ValueTextPayload, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="Показатель не найден")
 
     parsed = parse_value_text(payload.value_text)
+    validate_parsed_value_for_indicator(indicator, parsed)
 
     item = NormalValue(
         indicator_id=payload.indicator_id,
         **parsed,
     )
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-
-    return {
-        "id": item.id,
-        "indicator_id": item.indicator_id,
-        "value_text": format_value(
-            item.value_kind, item.min_value, item.max_value,
-            item.min_inclusive, item.max_inclusive, item.scalar_value
-        ),
-    }
 
 
 @router.delete("/normal-values/{value_id}")
@@ -752,6 +778,7 @@ def get_severity_values(
             {
                 "indicator_id": indicator.id,
                 "indicator_name": indicator.name,
+                "indicator_value_type": indicator.value_type,
                 "value_text": format_value(
                     value.value_kind,
                     value.min_value,
@@ -786,6 +813,7 @@ def replace_severity_values(payload: SeverityValuesPayload, db: Session = Depend
             continue
 
         parsed = parse_value_text(value_text)
+        validate_parsed_value_for_indicator(indicator, parsed)
 
         db.add(
             SeverityValue(
@@ -808,33 +836,43 @@ def get_diagnosis_values(
     diagnosis_id: int = Query(...),
     db: Session = Depends(get_db),
 ):
-    indicators = db.query(Indicator).order_by(Indicator.id).all()
     state_map = get_state_characteristic_map(db, diagnosis_id)
+    selected_indicator_ids = list(state_map.keys())
+
+    if not selected_indicator_ids:
+        return {"diagnosis_id": diagnosis_id, "rows": []}
+
+    indicators = (
+        db.query(Indicator)
+        .filter(Indicator.id.in_(selected_indicator_ids))
+        .order_by(Indicator.id)
+        .all()
+    )
 
     rows = []
     for indicator in indicators:
         value_text = ""
 
-        if indicator.id in state_map:
-            value = (
-                db.query(DiagnosisValue)
-                .filter(DiagnosisValue.state_characteristic_id == state_map[indicator.id])
-                .first()
+        value = (
+            db.query(DiagnosisValue)
+            .filter(DiagnosisValue.state_characteristic_id == state_map[indicator.id])
+            .first()
+        )
+        if value:
+            value_text = format_value(
+                value.value_kind,
+                value.min_value,
+                value.max_value,
+                value.min_inclusive,
+                value.max_inclusive,
+                value.scalar_value,
             )
-            if value:
-                value_text = format_value(
-                    value.value_kind,
-                    value.min_value,
-                    value.max_value,
-                    value.min_inclusive,
-                    value.max_inclusive,
-                    value.scalar_value,
-                )
 
         rows.append(
             {
                 "indicator_id": indicator.id,
                 "indicator_name": indicator.name,
+                "indicator_value_type": indicator.value_type,
                 "value_text": value_text,
             }
         )
@@ -862,16 +900,17 @@ def replace_diagnosis_values(payload: DiagnosisValuesPayload, db: Session = Depe
             continue
 
         if row.indicator_id not in state_map:
-            db.add(
-                StateCharacteristic(
-                    diagnosis_id=payload.diagnosis_id,
-                    indicator_id=row.indicator_id,
-                )
+            raise HTTPException(
+                status_code=400,
+                detail="Нельзя задать правило для показателя, который не выбран в характеристиках состояния",
             )
-            db.flush()
-            state_map = get_state_characteristic_map(db, payload.diagnosis_id)
+
+        indicator = db.query(Indicator).filter(Indicator.id == row.indicator_id).first()
+        if not indicator:
+            continue
 
         parsed = parse_value_text(value_text)
+        validate_parsed_value_for_indicator(indicator, parsed)
 
         db.add(
             DiagnosisValue(

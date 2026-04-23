@@ -4,7 +4,7 @@
       <div class="card-header">
         <h2>Правила степеней тяжести</h2>
         <p>
-          Выберите степень тяжести и задайте для каждого показателя его значение
+          Для каждого показателя задаётся значение с учётом его типа
         </p>
       </div>
 
@@ -20,32 +20,40 @@
       <div v-if="message" class="success-message">{{ message }}</div>
       <div v-if="error" class="error-message">{{ error }}</div>
 
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Показатель</th>
-              <th>Значение показателя</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in rows" :key="row.indicator_id">
-              <td>{{ row.indicator_name }}</td>
-              <td>
-                <input
-                  v-model="row.value_text"
-                  class="table-input"
-                  placeholder="[0;30] или Все работают"
-                />
-              </td>
-            </tr>
-            <tr v-if="!rows.length">
-              <td colspan="2" class="empty-cell">
-                Выберите степень тяжести, чтобы загрузить правила
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="rows-list">
+        <div
+          v-for="row in rows"
+          :key="row.indicator_id"
+          class="row-card"
+          :class="{ invalid: (row.touched || submitted) && !validateRow(row).valid }"
+        >
+          <div class="row-title">
+            <span>{{ row.indicator_name }}</span>
+            <span class="row-type">
+              {{
+                row.indicator_value_type === "numeric"
+                  ? "Только диапазон"
+                  : row.indicator_value_type === "categorical"
+                  ? "Только текст"
+                  : "Любой тип"
+              }}
+            </span>
+          </div>
+
+          <ValueEditor
+            :model-value="row.editor"
+            :allow-empty="true"
+            :show-errors="row.touched || submitted"
+            :forced-mode="
+              row.indicator_value_type === 'numeric'
+                ? 'range'
+                : row.indicator_value_type === 'categorical'
+                ? 'scalar'
+                : null
+            "
+            @update:modelValue="(value) => handleRowChange(row, value)"
+          />
+        </div>
       </div>
 
       <div class="save-row">
@@ -56,40 +64,39 @@
     </section>
 
     <aside class="card side-card">
-      <h3>Контекст</h3>
+      <h3>Подсказка</h3>
 
-      <div class="info-block">
-        <div class="label">Выбранная степень тяжести</div>
-        <div class="value">{{ selectedSeverityName || "Не выбрана" }}</div>
-      </div>
-
-      <div class="info-block">
-        <div class="label">Количество строк</div>
-        <div class="value">{{ rows.length }}</div>
+      <div class="hint-block">
+        <div class="hint-title">Числовые показатели</div>
+        <div class="hint-text">Для них доступен только диапазон</div>
       </div>
 
       <div class="hint-block">
-        <div class="hint-title">Примеры формата</div>
-        <div class="hint-text">[0;30]</div>
-        <div class="hint-text">(30;60]</div>
-        <div class="hint-text">Все работают</div>
+        <div class="hint-title">Категориальные показатели</div>
+        <div class="hint-text">Для них доступен только текст</div>
       </div>
 
-      <p class="hint-note">
-        Пустые значения не сохраняются. Если правило не нужно,
-        просто оставь поле пустым.
-      </p>
+      <div class="hint-block">
+        <div class="hint-title">Пустое значение</div>
+        <div class="hint-text">Означает, что правило не задано</div>
+      </div>
     </aside>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { onMounted, ref } from "vue";
+import ValueEditor from "../../components/ValueEditor.vue";
 import {
   getSeverityNames,
   getSeverityValues,
   saveSeverityValues,
 } from "../../api/knowledge";
+import {
+  parseValueText,
+  formatValueEditor,
+  validateValueEditor,
+} from "../../utils/valueEditor";
 
 const severityNames = ref([]);
 const selectedSeverityId = ref("");
@@ -97,15 +104,12 @@ const rows = ref([]);
 
 const message = ref("");
 const error = ref("");
+const submitted = ref(false);
 
 const clearMessages = () => {
   message.value = "";
   error.value = "";
 };
-
-const selectedSeverityName = computed(() => {
-  return severityNames.value.find((x) => x.id === selectedSeverityId.value)?.name || "";
-});
 
 const loadSeverityNamesData = async () => {
   try {
@@ -118,6 +122,7 @@ const loadSeverityNamesData = async () => {
 
 const loadRows = async () => {
   clearMessages();
+  submitted.value = false;
 
   if (!selectedSeverityId.value) {
     rows.value = [];
@@ -126,24 +131,52 @@ const loadRows = async () => {
 
   try {
     const data = await getSeverityValues(selectedSeverityId.value);
-    rows.value = data.rows || [];
+    rows.value = (data.rows || []).map((row) => ({
+      ...row,
+      editor: parseValueText(row.value_text),
+      touched: false,
+    }));
   } catch (err) {
     console.error(err);
     error.value = "Не удалось загрузить правила степени тяжести.";
   }
 };
 
+const handleRowChange = (row, value) => {
+  row.editor = value;
+  row.touched = true;
+};
+
+const validateRow = (row) => {
+  return validateValueEditor(row.editor, { allowEmpty: true });
+};
+
 const handleSave = async () => {
   clearMessages();
+  submitted.value = true;
 
   if (!selectedSeverityId.value) {
     error.value = "Сначала выберите степень тяжести.";
     return;
   }
 
+  const invalidRow = rows.value.find((row) => !validateRow(row).valid);
+  if (invalidRow) {
+    error.value = `Исправьте неверное значение для показателя: ${invalidRow.indicator_name}`;
+    return;
+  }
+
   try {
-    await saveSeverityValues(selectedSeverityId.value, rows.value);
+    await saveSeverityValues(
+      selectedSeverityId.value,
+      rows.value.map((row) => ({
+        indicator_id: row.indicator_id,
+        value_text: formatValueEditor(row.editor),
+      }))
+    );
+
     message.value = "Правила степени тяжести сохранены.";
+    submitted.value = false;
     await loadRows();
   } catch (err) {
     console.error(err);
@@ -187,8 +220,7 @@ onMounted(async () => {
   margin: 20px 0 16px 0;
 }
 
-.select-input,
-.table-input {
+.select-input {
   width: 100%;
   min-height: 46px;
   border: 1px solid #cbd5e1;
@@ -209,20 +241,37 @@ onMounted(async () => {
   font-weight: 700;
 }
 
-.table-wrap {
-  overflow: auto;
+.rows-list {
+  display: grid;
+  gap: 14px;
 }
 
-.data-table {
-  width: 100%;
-  border-collapse: collapse;
+.row-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 18px;
+  padding: 16px;
+  background: #f8fafc;
 }
 
-.data-table th,
-.data-table td {
-  padding: 14px 12px;
-  border-bottom: 1px solid #e2e8f0;
-  text-align: left;
+.row-card.invalid {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.row-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  font-weight: 800;
+  color: #0f172a;
+  margin-bottom: 12px;
+}
+
+.row-type {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 700;
 }
 
 .save-row {
@@ -246,22 +295,6 @@ onMounted(async () => {
   margin-top: 0;
 }
 
-.info-block {
-  margin-bottom: 22px;
-}
-
-.label {
-  color: #64748b;
-  font-size: 13px;
-  margin-bottom: 6px;
-}
-
-.value {
-  color: #0f172a;
-  font-weight: 800;
-  font-size: 18px;
-}
-
 .hint-block {
   margin-bottom: 18px;
 }
@@ -275,13 +308,6 @@ onMounted(async () => {
 
 .hint-text {
   color: #64748b;
-  margin-bottom: 6px;
-}
-
-.hint-note,
-.empty-cell {
-  color: #64748b;
-  line-height: 1.6;
 }
 
 @media (max-width: 980px) {
@@ -295,6 +321,11 @@ onMounted(async () => {
 
   .primary-btn {
     width: 100%;
+  }
+
+  .row-title {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>

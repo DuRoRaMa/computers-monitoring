@@ -9,3 +9,4 @@ class Indicator(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    value_type: Mapped[str] = mapped_column(String(32), nullable=False, default="numeric")

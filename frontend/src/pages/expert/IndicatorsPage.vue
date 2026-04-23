@@ -6,13 +6,19 @@
         <p>Справочник показателей, которые используются в экспертной системе</p>
       </div>
 
-      <div class="form-row">
+      <div class="form-grid">
         <input
           v-model="newIndicatorName"
           class="text-input"
           placeholder="Введите название показателя"
           @keyup.enter="handleCreate"
         />
+
+        <select v-model="newIndicatorType" class="select-input">
+          <option value="numeric">Числовой</option>
+          <option value="categorical">Категориальный</option>
+        </select>
+
         <button class="primary-btn" @click="handleCreate">
           Добавить
         </button>
@@ -27,6 +33,7 @@
             <tr>
               <th>ID</th>
               <th>Название</th>
+              <th>Тип</th>
               <th></th>
             </tr>
           </thead>
@@ -39,6 +46,11 @@
             >
               <td>{{ item.id }}</td>
               <td>{{ item.name }}</td>
+              <td>
+                <span class="type-badge" :class="item.value_type">
+                  {{ formatType(item.value_type) }}
+                </span>
+              </td>
               <td class="actions-cell">
                 <button class="danger-btn" @click.stop="handleDelete(item.id)">
                   Удалить
@@ -46,7 +58,7 @@
               </td>
             </tr>
             <tr v-if="!indicators.length">
-              <td colspan="3" class="empty-cell">Показатели пока не добавлены</td>
+              <td colspan="4" class="empty-cell">Показатели пока не добавлены</td>
             </tr>
           </tbody>
         </table>
@@ -65,6 +77,11 @@
         <div class="info-block">
           <div class="label">Название</div>
           <div class="value">{{ selectedIndicator.name }}</div>
+        </div>
+
+        <div class="info-block">
+          <div class="label">Тип показателя</div>
+          <div class="value">{{ formatType(selectedIndicator.value_type) }}</div>
         </div>
       </template>
 
@@ -88,6 +105,7 @@ import {
 const indicators = ref([]);
 const selectedIndicator = ref(null);
 const newIndicatorName = ref("");
+const newIndicatorType = ref("numeric");
 const message = ref("");
 const error = ref("");
 
@@ -96,8 +114,15 @@ const clearMessages = () => {
   error.value = "";
 };
 
+const formatType = (valueType) => {
+  if (valueType === "numeric") return "Числовой";
+  if (valueType === "categorical") return "Категориальный";
+  return valueType;
+};
+
 const loadIndicators = async () => {
   clearMessages();
+
   try {
     indicators.value = await getIndicators();
 
@@ -106,6 +131,9 @@ const loadIndicators = async () => {
       !indicators.value.find((x) => x.id === selectedIndicator.value.id)
     ) {
       selectedIndicator.value = null;
+    } else if (selectedIndicator.value) {
+      selectedIndicator.value =
+        indicators.value.find((x) => x.id === selectedIndicator.value.id) || null;
     }
   } catch (err) {
     console.error(err);
@@ -122,8 +150,9 @@ const handleCreate = async () => {
   }
 
   try {
-    await createIndicator(newIndicatorName.value);
+    await createIndicator(newIndicatorName.value, newIndicatorType.value);
     newIndicatorName.value = "";
+    newIndicatorType.value = "numeric";
     message.value = "Показатель успешно добавлен.";
     await loadIndicators();
   } catch (err) {
@@ -178,19 +207,21 @@ onMounted(() => {
   color: #64748b;
 }
 
-.form-row {
-  display: flex;
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 220px 140px;
   gap: 12px;
   margin: 20px 0;
 }
 
-.text-input {
-  flex: 1;
+.text-input,
+.select-input {
   min-height: 46px;
   border: 1px solid #cbd5e1;
   border-radius: 14px;
   padding: 0 14px;
   font-size: 15px;
+  background: white;
 }
 
 .primary-btn {
@@ -258,6 +289,26 @@ onMounted(() => {
   cursor: pointer;
 }
 
+.type-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.type-badge.numeric {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.type-badge.categorical {
+  background: #dcfce7;
+  color: #166534;
+}
+
 .side-card h3 {
   margin-top: 0;
   color: #0f172a;
@@ -289,8 +340,8 @@ onMounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .form-row {
-    flex-direction: column;
+  .form-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

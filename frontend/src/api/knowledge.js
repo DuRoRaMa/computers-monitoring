@@ -33,8 +33,11 @@ export const getIndicators = async () => {
   return response.data;
 };
 
-export const createIndicator = async (name) => {
-  const response = await http.post("/knowledge/indicators", { name });
+export const createIndicator = async (name, valueType) => {
+  const response = await http.post("/knowledge/indicators", {
+    name,
+    value_type: valueType,
+  });
   return response.data;
 };
 

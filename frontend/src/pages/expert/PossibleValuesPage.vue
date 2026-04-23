@@ -3,11 +3,11 @@
     <section class="card">
       <div class="card-header">
         <h2>Возможные значения</h2>
-        <p>Выберите показатель и управляйте его допустимыми значениями</p>
+        <p>Выберите показатель и задайте корректное значение через редактор</p>
       </div>
 
       <div class="controls">
-        <select v-model="selectedIndicatorId" class="select-input" @change="loadValues">
+        <select v-model="selectedIndicatorId" class="select-input" @change="handleIndicatorChange">
           <option disabled value="">Выберите показатель</option>
           <option v-for="item in indicators" :key="item.id" :value="item.id">
             {{ item.name }}
@@ -15,15 +15,20 @@
         </select>
       </div>
 
-      <div class="form-row">
-        <input
-          v-model="newValueText"
-          class="text-input"
-          placeholder="Например: [0;30] или Все работают"
-          @keyup.enter="handleCreate"
+      <div class="editor-box" :class="{ invalid: touched && !createValidation.valid }">
+        <ValueEditor
+          v-if="newValueEditor"
+          :model-value="newValueEditor"
+          :allow-empty="false"
+          :show-errors="touched"
+          :forced-mode="forcedMode"
+          @update:modelValue="handleEditorChange"
         />
+      </div>
+
+      <div class="action-row">
         <button class="primary-btn" @click="handleCreate">
-          Добавить
+          Добавить значение
         </button>
       </div>
 
@@ -60,25 +65,38 @@
     </section>
 
     <aside class="card side-card">
-      <h3>Подсказка по формату</h3>
+      <h3>Подсказка</h3>
 
       <div class="hint-block">
-        <div class="hint-title">Диапазоны</div>
-        <div class="hint-text">[0;30]</div>
-        <div class="hint-text">(30;60]</div>
-        <div class="hint-text">[50;80)</div>
-      </div>
-
-      <div class="hint-block">
-        <div class="hint-title">Текстовые значения</div>
-        <div class="hint-text">Все работают</div>
-        <div class="hint-text">Некоторые остановлены</div>
+        <div class="hint-title">Тип ввода</div>
+        <div class="hint-text">
+          {{
+            forcedMode === "range"
+              ? "Для этого показателя разрешён только диапазон"
+              : forcedMode === "scalar"
+              ? "Для этого показателя разрешён только текст"
+              : "Тип значения определяется автоматически"
+          }}
+        </div>
       </div>
 
       <div class="hint-block">
         <div class="hint-title">Текущий показатель</div>
         <div class="hint-text strong">
-          {{ selectedIndicatorName || "Не выбран" }}
+          {{ selectedIndicator?.name || "Не выбран" }}
+        </div>
+      </div>
+
+      <div class="hint-block">
+        <div class="hint-title">Тип показателя</div>
+        <div class="hint-text strong">
+          {{
+            selectedIndicator?.value_type === "numeric"
+              ? "Числовой"
+              : selectedIndicator?.value_type === "categorical"
+              ? "Категориальный"
+              : "Не определён"
+          }}
         </div>
       </div>
     </aside>
@@ -86,29 +104,66 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watchEffect } from "vue";
+import ValueEditor from "../../components/ValueEditor.vue";
 import {
   createPossibleValue,
   deletePossibleValue,
   getIndicators,
   getPossibleValues,
 } from "../../api/knowledge";
+import {
+  createValueEditor,
+  formatValueEditor,
+  validateValueEditor,
+} from "../../utils/valueEditor";
 
 const indicators = ref([]);
 const selectedIndicatorId = ref("");
 const values = ref([]);
-const newValueText = ref("");
+const newValueEditor = ref(createValueEditor("range"));
 const message = ref("");
 const error = ref("");
+const touched = ref(false);
+
+watchEffect(() => {
+  if (!newValueEditor.value || typeof newValueEditor.value !== "object") {
+    newValueEditor.value = createValueEditor("range");
+  }
+});
 
 const clearMessages = () => {
   message.value = "";
   error.value = "";
 };
 
-const selectedIndicatorName = computed(() => {
-  return indicators.value.find((x) => x.id === selectedIndicatorId.value)?.name || "";
+const selectedIndicator = computed(() => {
+  return indicators.value.find((x) => x.id === selectedIndicatorId.value) || null;
 });
+
+const forcedMode = computed(() => {
+  if (!selectedIndicator.value) return null;
+  if (selectedIndicator.value.value_type === "numeric") return "range";
+  if (selectedIndicator.value.value_type === "categorical") return "scalar";
+  return null;
+});
+
+const createValidation = computed(() =>
+  validateValueEditor(
+    newValueEditor.value ?? createValueEditor(forcedMode.value || "range"),
+    { allowEmpty: false }
+  )
+);
+
+const resetEditorByMode = () => {
+  touched.value = false;
+  newValueEditor.value = createValueEditor(forcedMode.value || "range");
+};
+
+const handleEditorChange = (value) => {
+  touched.value = true;
+  newValueEditor.value = value;
+};
 
 const loadIndicatorsData = async () => {
   try {
@@ -135,22 +190,32 @@ const loadValues = async () => {
   }
 };
 
+const handleIndicatorChange = async () => {
+  resetEditorByMode();
+  await loadValues();
+};
+
 const handleCreate = async () => {
   clearMessages();
+  touched.value = true;
 
   if (!selectedIndicatorId.value) {
     error.value = "Сначала выберите показатель.";
     return;
   }
 
-  if (!newValueText.value.trim()) {
-    error.value = "Введите значение.";
+  if (!createValidation.value.valid) {
+    error.value = "Исправьте неверно введённое значение.";
     return;
   }
 
   try {
-    await createPossibleValue(selectedIndicatorId.value, newValueText.value);
-    newValueText.value = "";
+    await createPossibleValue(
+      selectedIndicatorId.value,
+      formatValueEditor(newValueEditor.value)
+    );
+
+    resetEditorByMode();
     message.value = "Возможное значение добавлено.";
     await loadValues();
   } catch (err) {
@@ -206,11 +271,10 @@ onMounted(async () => {
 }
 
 .controls {
-  margin: 20px 0 14px 0;
+  margin: 20px 0 16px 0;
 }
 
-.select-input,
-.text-input {
+.select-input {
   width: 100%;
   min-height: 46px;
   border: 1px solid #cbd5e1;
@@ -219,14 +283,28 @@ onMounted(async () => {
   font-size: 15px;
 }
 
-.form-row {
+.editor-box {
+  border: 1px solid #e2e8f0;
+  border-radius: 18px;
+  padding: 16px;
+  background: #f8fafc;
+}
+
+.editor-box.invalid {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.action-row {
   display: flex;
-  gap: 12px;
-  margin-bottom: 18px;
+  justify-content: flex-end;
+  margin-top: 16px;
+  margin-bottom: 8px;
 }
 
 .primary-btn {
-  min-width: 140px;
+  min-width: 180px;
+  min-height: 48px;
   border: none;
   border-radius: 14px;
   background: linear-gradient(135deg, #2563eb 0%, #0ea5e9 100%);
@@ -249,6 +327,7 @@ onMounted(async () => {
 
 .table-wrap {
   overflow: auto;
+  margin-top: 12px;
 }
 
 .data-table {
@@ -297,13 +376,10 @@ onMounted(async () => {
   margin-bottom: 6px;
 }
 
-.hint-text.strong {
+.hint-text.strong,
+.empty-cell {
   color: #0f172a;
   font-weight: 700;
-}
-
-.empty-cell {
-  color: #64748b;
 }
 
 @media (max-width: 980px) {
@@ -311,8 +387,12 @@ onMounted(async () => {
     grid-template-columns: 1fr;
   }
 
-  .form-row {
-    flex-direction: column;
+  .action-row {
+    justify-content: stretch;
+  }
+
+  .primary-btn {
+    width: 100%;
   }
 }
 </style>

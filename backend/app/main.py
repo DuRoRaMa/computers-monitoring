@@ -6,6 +6,8 @@ from app.api.routes.knowledge import router as knowledge_router
 from app.api.routes.monitoring import router as monitoring_router
 from app.core.database import Base, engine
 
+from app.core.database import Base, engine
+
 from app.models.indicator import Indicator  # noqa: F401
 from app.models.diagnosis import Diagnosis  # noqa: F401
 from app.models.severity_name import SeverityName  # noqa: F401
@@ -14,7 +16,9 @@ from app.models.normal_value import NormalValue  # noqa: F401
 from app.models.state_characteristic import StateCharacteristic  # noqa: F401
 from app.models.diagnosis_value import DiagnosisValue  # noqa: F401
 from app.models.severity_value import SeverityValue  # noqa: F401
+from app.models.observation import Observation  # noqa: F401
 from app.api.routes import knowledge, monitoring, observations
+
 
 app = FastAPI(title="Computer Monitoring KBS")
 
