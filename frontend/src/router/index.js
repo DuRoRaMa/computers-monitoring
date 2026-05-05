@@ -16,7 +16,6 @@ import DiagnosisRulesPage from "../pages/expert/DiagnosisRulesPage.vue";
 
 import MonitoringPage from "../pages/user/MonitoringPage.vue";
 import ObservationHistoryPage from "../pages/user/ObservationHistoryPage.vue";
-import DiagnosisPage from "../pages/user/DiagnosisPage.vue";
 
 const routes = [
   {
@@ -52,7 +51,6 @@ const routes = [
       { path: "", redirect: "/user/monitoring" },
       { path: "monitoring", component: MonitoringPage },
       { path: "history", component: ObservationHistoryPage },
-      { path: "diagnosis", component: DiagnosisPage },
     ],
   },
 ];

@@ -17,9 +17,6 @@
           История наблюдений
         </RouterLink>
 
-        <RouterLink class="nav-link" to="/user/diagnosis">
-          Постановка диагноза
-        </RouterLink>
       </div>
 
       <div class="sidebar-footer">

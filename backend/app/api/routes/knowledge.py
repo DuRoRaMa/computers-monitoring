@@ -18,6 +18,8 @@ router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 # =========================
 # Pydantic payloads
 # =========================
+class MoveSeverityPayload(BaseModel):
+    direction: str
 
 class NamePayload(BaseModel):
     name: str
@@ -98,6 +100,40 @@ def format_value(value_kind: str, min_value, max_value, min_inclusive, max_inclu
     right = "]" if max_inclusive else ")"
     return f"{left}{float_to_text(min_value)};{float_to_text(max_value)}{right}"
 
+@router.post("/severity-names/{severity_id}/move")
+def move_severity_name(
+    severity_id: int,
+    payload: MoveSeverityPayload,
+    db: Session = Depends(get_db),
+):
+    severity = db.query(SeverityName).filter(SeverityName.id == severity_id).first()
+    if not severity:
+        raise HTTPException(status_code=404, detail="Степень тяжести не найдена")
+
+    rows = db.query(SeverityName).order_by(SeverityName.order_number).all()
+    index = next((i for i, item in enumerate(rows) if item.id == severity_id), None)
+
+    if index is None:
+        raise HTTPException(status_code=404, detail="Степень тяжести не найдена")
+
+    direction = payload.direction.strip().lower()
+
+    if direction not in {"up", "down"}:
+        raise HTTPException(status_code=400, detail="Направление должно быть up или down")
+
+    if direction == "up":
+        if index == 0:
+            return {"message": "Степень тяжести уже имеет наивысший приоритет"}
+        target = rows[index - 1]
+    else:
+        if index == len(rows) - 1:
+            return {"message": "Степень тяжести уже имеет наименьший приоритет"}
+        target = rows[index + 1]
+
+    severity.order_number, target.order_number = target.order_number, severity.order_number
+    db.commit()
+
+    return {"message": "Приоритет степени тяжести обновлён"}
 
 def parse_value_text(value_text: str) -> dict:
     text = value_text.strip()
@@ -677,6 +713,17 @@ def create_normal_value(payload: ValueTextPayload, db: Session = Depends(get_db)
     if not indicator:
         raise HTTPException(status_code=404, detail="Показатель не найден")
 
+    existing = (
+        db.query(NormalValue)
+        .filter(NormalValue.indicator_id == payload.indicator_id)
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail="Для этого показателя уже задано нормальное значение",
+        )
+
     parsed = parse_value_text(payload.value_text)
     validate_parsed_value_for_indicator(indicator, parsed)
 
@@ -684,6 +731,22 @@ def create_normal_value(payload: ValueTextPayload, db: Session = Depends(get_db)
         indicator_id=payload.indicator_id,
         **parsed,
     )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+
+    return {
+        "id": item.id,
+        "indicator_id": item.indicator_id,
+        "value_text": format_value(
+            item.value_kind,
+            item.min_value,
+            item.max_value,
+            item.min_inclusive,
+            item.max_inclusive,
+            item.scalar_value,
+        ),
+    }
 
 
 @router.delete("/normal-values/{value_id}")

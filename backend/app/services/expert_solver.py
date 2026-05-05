@@ -10,7 +10,17 @@ from app.models.severity_value import SeverityValue
 class ExpertSolver:
     def __init__(self, db: Session):
         self.db = db
-
+    def _get_default_payload(self) -> dict[str, Any]:
+        return {
+            "cpu_load": 20,
+            "ram_usage": 35,
+            "cpu_temp": 45,
+            "disk_speed": 150,
+            "disk_fill": 40,
+            "network_bandwidth": 3000,
+            "process_count": 80,
+            "service_state": "Все работают",
+        }
     def _match_rule(self, value: Any, rule: SeverityValue) -> bool:
         if rule.value_kind == "scalar":
             return str(value) == str(rule.scalar_value)
@@ -108,14 +118,25 @@ class ExpertSolver:
         final_state: str,
         dynamics: str | None,
         diagnosis: str,
+        missing_indicators: list[str],
     ) -> str:
         worst = max(indicator_results, key=lambda item: item["severity_order"])
+
         explanation = (
             f"Итоговая степень тяжести состояния определена как '{final_state}', "
             f"так как наиболее тяжёлым оказался показатель '{worst['indicator']}' "
             f"со значением '{worst['value']}', которому соответствует состояние "
             f"'{worst['severity']}'. "
         )
+
+        if missing_indicators:
+            explanation += (
+                "Часть показателей не была введена пользователем. "
+                "Для этих показателей экспертная система использовала допущение "
+                "об их оптимальном состоянии: "
+                + ", ".join(missing_indicators)
+                + ". "
+            )
 
         if dynamics is not None:
             explanation += f"Динамика состояния компьютера определена как '{dynamics}'. "
@@ -124,31 +145,54 @@ class ExpertSolver:
         return explanation
 
     def evaluate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        defaults = self._get_default_payload()
+
+        source_to_indicator = {
+            "cpu_load": "CPU загрузка",
+            "ram_usage": "RAM занятость",
+            "cpu_temp": "CPU температура",
+            "disk_speed": "Диск скорость",
+            "disk_fill": "Диск заполнение",
+            "network_bandwidth": "Сеть пропускная",
+            "process_count": "Процессы количество",
+            "service_state": "Сервисы состояние",
+        }
+
+        resolved_input: dict[str, Any] = {}
+        missing_indicators: list[str] = []
+
+        for source_key, indicator_name in source_to_indicator.items():
+            if payload.get(source_key) is None:
+                resolved_input[source_key] = defaults[source_key]
+                missing_indicators.append(indicator_name)
+            else:
+                resolved_input[source_key] = payload[source_key]
+
         indicators_map = {
-            "CPU загрузка": payload["cpu_load"],
-            "RAM занятость": payload["ram_usage"],
-            "CPU температура": payload["cpu_temp"],
-            "Диск скорость": payload["disk_speed"],
-            "Диск заполнение": payload["disk_fill"],
-            "Сеть пропускная": payload["network_bandwidth"],
-            "Процессы количество": payload["process_count"],
-            "Сервисы состояние": payload["service_state"],
+            "CPU загрузка": resolved_input["cpu_load"],
+            "RAM занятость": resolved_input["ram_usage"],
+            "CPU температура": resolved_input["cpu_temp"],
+            "Диск скорость": resolved_input["disk_speed"],
+            "Диск заполнение": resolved_input["disk_fill"],
+            "Сеть пропускная": resolved_input["network_bandwidth"],
+            "Процессы количество": resolved_input["process_count"],
+            "Сервисы состояние": resolved_input["service_state"],
         }
 
         indicator_results = []
         for indicator_name, value in indicators_map.items():
-            indicator_results.append(
-                self.detect_indicator_severity(indicator_name, value)
-            )
+            indicator_results.append(self.detect_indicator_severity(indicator_name, value))
 
         final_state = self.detect_final_state(indicator_results)
         dynamics = self.detect_dynamics(final_state, payload.get("previous_state"))
         diagnosis = self.detect_diagnosis(final_state, dynamics)
+
         explanation = self.build_explanation(
             indicator_results=indicator_results,
             final_state=final_state,
             dynamics=dynamics,
             diagnosis=diagnosis,
+            missing_indicators=missing_indicators,
         )
 
         return {
@@ -157,4 +201,9 @@ class ExpertSolver:
             "dynamics": dynamics,
             "diagnosis": diagnosis,
             "explanation": explanation,
+            "missing_indicators": missing_indicators,
+            "resolved_input": {
+                **resolved_input,
+                "previous_state": payload.get("previous_state"),
+            },
         }

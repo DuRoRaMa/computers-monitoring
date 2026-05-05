@@ -151,3 +151,10 @@ export const saveDiagnosisValues = async (diagnosisId, rows) => {
   });
   return response.data;
 };
+
+export const moveSeverityName = async (id, direction) => {
+  const response = await http.post(`/knowledge/severity-names/${id}/move`, {
+    direction,
+  });
+  return response.data;
+};
