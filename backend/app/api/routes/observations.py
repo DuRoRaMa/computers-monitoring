@@ -1,4 +1,5 @@
 import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -11,7 +12,7 @@ router = APIRouter(prefix="/observations", tags=["observations"])
 
 class IndicatorResultPayload(BaseModel):
     indicator: str
-    value: str
+    value: str | int | float
     severity: str
 
 
@@ -25,12 +26,10 @@ class ObservationCreatePayload(BaseModel):
     process_count: float
     service_state: str
     previous_state: str | None = None
-
     final_state: str
     dynamics: str | None = None
     diagnosis: str
     explanation: str
-
     indicator_results: list[IndicatorResultPayload]
 
 
@@ -61,6 +60,15 @@ def serialize_observation(item: Observation):
 
 @router.post("")
 def create_observation(payload: ObservationCreatePayload, db: Session = Depends(get_db)):
+    normalized_indicator_results = [
+        {
+            "indicator": x.indicator,
+            "value": str(x.value),
+            "severity": x.severity,
+        }
+        for x in payload.indicator_results
+    ]
+
     item = Observation(
         cpu_load=payload.cpu_load,
         ram_usage=payload.ram_usage,
@@ -71,21 +79,18 @@ def create_observation(payload: ObservationCreatePayload, db: Session = Depends(
         process_count=payload.process_count,
         service_state=payload.service_state,
         previous_state=payload.previous_state,
-
         final_state=payload.final_state,
         dynamics=payload.dynamics,
         diagnosis=payload.diagnosis,
         explanation=payload.explanation,
         indicator_results_json=json.dumps(
-            [x.model_dump() for x in payload.indicator_results],
-            ensure_ascii=False
+            normalized_indicator_results,
+            ensure_ascii=False,
         ),
     )
-
     db.add(item)
     db.commit()
     db.refresh(item)
-
     return serialize_observation(item)
 
 
@@ -110,7 +115,6 @@ def get_observation(observation_id: int, db: Session = Depends(get_db)):
     item = db.query(Observation).filter(Observation.id == observation_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Наблюдение не найдено")
-
     return serialize_observation(item)
 
 

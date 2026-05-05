@@ -1,0 +1,79 @@
+{
+  "dataset_path": "C:\\Users\\DuRoRaMa\\Desktop\\Учеба\\МТИПС\\Реализация\\computer-monitoring\\backend\\app\\ml\\artifacts\\synthetic_monitoring_dataset.csv",
+  "model_path": "C:\\Users\\DuRoRaMa\\Desktop\\Учеба\\МТИПС\\Реализация\\computer-monitoring\\backend\\app\\ml\\artifacts\\rf_state_classifier.joblib",
+  "best_params": {
+    "model__n_estimators": 500,
+    "model__min_samples_split": 5,
+    "model__min_samples_leaf": 4,
+    "model__max_features": "log2",
+    "model__max_depth": 10,
+    "model__class_weight": "balanced"
+  },
+  "best_cv_score_f1_macro": 0.9380292744263414,
+  "test_f1_macro": 0.9436884028698733,
+  "class_distribution": {
+    "Оптимальное": 4022,
+    "Хорошее": 3621,
+    "Критическое": 2661,
+    "Критическое с риском отказа": 1696
+  },
+  "feature_names": [
+    "cpu_load",
+    "ram_usage",
+    "cpu_temp",
+    "disk_speed",
+    "disk_fill",
+    "network_bandwidth",
+    "process_count",
+    "service_state"
+  ],
+  "mask_features": [
+    "cpu_load_is_missing",
+    "ram_usage_is_missing",
+    "cpu_temp_is_missing",
+    "disk_speed_is_missing",
+    "disk_fill_is_missing",
+    "network_bandwidth_is_missing",
+    "process_count_is_missing",
+    "service_state_is_missing"
+  ],
+  "classification_report": {
+    "Критическое": {
+      "precision": 0.9497098646034816,
+      "recall": 0.9229323308270677,
+      "f1-score": 0.9361296472831268,
+      "support": 532.0
+    },
+    "Критическое с риском отказа": {
+      "precision": 0.9966101694915255,
+      "recall": 0.8672566371681416,
+      "f1-score": 0.9274447949526814,
+      "support": 339.0
+    },
+    "Оптимальное": {
+      "precision": 0.9263521288837745,
+      "recall": 1.0,
+      "f1-score": 0.961768219832736,
+      "support": 805.0
+    },
+    "Хорошее": {
+      "precision": 0.952712100139082,
+      "recall": 0.9461325966850829,
+      "f1-score": 0.9494109494109494,
+      "support": 724.0
+    },
+    "accuracy": 0.9479166666666666,
+    "macro avg": {
+      "precision": 0.9563460657794659,
+      "recall": 0.934080391170073,
+      "f1-score": 0.9436884028698733,
+      "support": 2400.0
+    },
+    "weighted avg": {
+      "precision": 0.9494056331995055,
+      "recall": 0.9479166666666666,
+      "f1-score": 0.947509042576026,
+      "support": 2400.0
+    }
+  }
+}

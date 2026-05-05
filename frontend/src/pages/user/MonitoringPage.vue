@@ -3,25 +3,11 @@
     <section class="input-card">
       <div class="section-header">
         <h2>Мониторинг состояния</h2>
-        <p>Можно вводить не все показатели. Незаполненные поля будут обработаны отдельно.</p>
-      </div>
-
-      <div class="mode-switch">
-        <button
-          class="mode-btn"
-          :class="{ active: analysisMode === 'expert' }"
-          @click="analysisMode = 'expert'"
-        >
-          Экспертная система
-        </button>
-
-        <button
-          class="mode-btn"
-          :class="{ active: analysisMode === 'ml' }"
-          @click="analysisMode = 'ml'"
-        >
-          Машинное обучение
-        </button>
+        <p>
+          Экспертная система и модуль машинного обучения рассчитываются всегда.
+          При полном наборе признаков итоговый ответ даёт экспертная система,
+          при неполном — модуль машинного обучения.
+        </p>
       </div>
 
       <div class="form-grid">
@@ -53,23 +39,25 @@
         <div class="field-card readonly-card">
           <span>Предыдущее состояние</span>
           <div class="readonly-value">
-            {{ previousState || "Не найдено предыдущее наблюдение" }}
+            <template v-if="historyLoading">
+              Загрузка предыдущего состояния...
+            </template>
+            <template v-else-if="lastFinalState">
+              {{ lastFinalState }}
+            </template>
+            <template v-else>
+              Не задано — первое наблюдение
+            </template>
           </div>
           <small class="field-hint">
-            Подставляется автоматически из последнего наблюдения
+            При первом прогоне предыдущее состояние не учитывается
           </small>
         </div>
       </div>
 
       <div class="actions-row">
-        <button class="primary-btn" @click="runAnalysis" :disabled="loading">
-          {{
-            loading
-              ? "Выполняется..."
-              : analysisMode === "expert"
-              ? "Проанализировать и сохранить"
-              : "Запустить ML-заглушку"
-          }}
+        <button class="primary-btn" @click="runMonitoringAndSave" :disabled="loading">
+          {{ loading ? "Выполняется..." : "Проанализировать и сохранить" }}
         </button>
       </div>
 
@@ -78,26 +66,39 @@
       <div v-if="error" class="error-message">{{ error }}</div>
     </section>
 
-    <section v-if="result" class="result-grid">
-      <div class="result-card">
-        <div class="result-label">Режим</div>
-        <div class="result-value">
-          {{ analysisMode === "expert" ? "Экспертная система" : "ML-заглушка" }}
+    <!-- Итог -->
+    <section v-if="result" class="details-card">
+      <div class="section-header">
+        <h3>Итоговый ответ системы</h3>
+      </div>
+
+      <div class="result-grid">
+        <div class="result-card">
+          <div class="result-label">Источник итогового ответа</div>
+          <div class="result-value">
+            {{ result.final_source === "expert" ? "Экспертная система" : "Модуль МО" }}
+          </div>
+        </div>
+
+        <div class="result-card">
+          <div class="result-label">Итоговое состояние</div>
+          <div class="result-value">{{ result.final_state }}</div>
+        </div>
+
+        <div class="result-card">
+          <div class="result-label">Диагноз</div>
+          <div class="result-value">{{ result.diagnosis }}</div>
         </div>
       </div>
 
-      <div class="result-card">
-        <div class="result-label">Итоговое состояние</div>
-        <div class="result-value">{{ result.final_state }}</div>
-      </div>
-
-      <div class="result-card">
-        <div class="result-label">Диагноз</div>
-        <div class="result-value">{{ result.diagnosis }}</div>
-      </div>
+      <p class="explanation-text">{{ result.explanation }}</p>
     </section>
 
-    <section v-if="result?.missing_indicators?.length" class="details-card">
+    <!-- Пропущенные признаки -->
+    <section
+      v-if="result?.missing_indicators && result.missing_indicators.length"
+      class="details-card"
+    >
       <div class="section-header">
         <h3>Незаполненные показатели</h3>
       </div>
@@ -108,20 +109,37 @@
       </p>
     </section>
 
-    <section v-if="result" class="details-card">
+    <!-- Результат ЭС -->
+    <section v-if="result?.expert_result" class="details-card">
       <div class="section-header">
-        <h3>Объяснение результата</h3>
+        <h3>Результат экспертной системы</h3>
       </div>
 
-      <p class="explanation-text">{{ result.explanation }}</p>
+      <div class="result-grid inner-grid">
+        <div class="result-card small">
+          <div class="result-label">Состояние</div>
+          <div class="result-value">{{ result.expert_result.final_state }}</div>
+        </div>
 
-      <div v-if="result.model_message" class="stub-note">
-        {{ result.model_message }}
+        <div class="result-card small">
+          <div class="result-label">Динамика</div>
+          <div class="result-value">
+            {{ result.expert_result.dynamics ?? "Не учитывалась" }}
+          </div>
+        </div>
+
+        <div class="result-card small">
+          <div class="result-label">Диагноз</div>
+          <div class="result-value">{{ result.expert_result.diagnosis }}</div>
+        </div>
       </div>
+
+      <p class="explanation-text">{{ result.expert_result.explanation }}</p>
     </section>
 
+    <!-- Детализация ЭС -->
     <section
-      v-if="result && result.indicator_results && result.indicator_results.length"
+      v-if="result?.indicator_results && result.indicator_results.length"
       class="details-card"
     >
       <div class="section-header">
@@ -148,24 +166,46 @@
       </div>
     </section>
 
-    <section
-      v-if="result && result.probabilities && result.probabilities.length"
-      class="details-card"
-    >
+    <!-- Результат МО -->
+    <section v-if="result?.ml_result" class="details-card">
       <div class="section-header">
-        <h3>Демонстрационные вероятности ML-модуля</h3>
+        <h3>Результат модуля машинного обучения</h3>
       </div>
 
-      <div class="probability-list">
+      <div class="result-grid inner-grid">
+        <div class="result-card small">
+          <div class="result-label">Состояние</div>
+          <div class="result-value">{{ result.ml_result.final_state }}</div>
+        </div>
+
+        <div class="result-card small">
+          <div class="result-label">Динамика</div>
+          <div class="result-value">
+            {{ result.ml_result.dynamics ?? "Не учитывалась" }}
+          </div>
+        </div>
+
+        <div class="result-card small">
+          <div class="result-label">Диагноз</div>
+          <div class="result-value">{{ result.ml_result.diagnosis }}</div>
+        </div>
+      </div>
+
+      <p class="explanation-text">{{ result.ml_result.explanation }}</p>
+
+      <div v-if="result.ml_result.probabilities?.length" class="probability-list">
         <div
-          v-for="item in result.probabilities"
+          v-for="item in result.ml_result.probabilities"
           :key="item.label"
           class="probability-card"
         >
           <div class="probability-name">{{ item.label }}</div>
           <div class="probability-value">{{ Math.round(item.value * 100) }}%</div>
           <div class="probability-bar">
-            <div class="probability-fill" :style="{ width: `${Math.round(item.value * 100)}%` }" />
+            <div
+              class="probability-fill"
+              :style="{ width: `${Math.round(item.value * 100)}%` }"
+            />
           </div>
         </div>
       </div>
@@ -175,16 +215,16 @@
 
 <script setup>
 import { onMounted, reactive, ref } from "vue";
-import { evaluateMonitoring, evaluateMonitoringMlStub } from "../../api/monitoring";
-import { createObservation, getLastObservation } from "../../api/observations";
+import { evaluateMonitoring } from "../../api/monitoring";
+import { createObservation, getObservations } from "../../api/observations";
 
-const analysisMode = ref("expert");
 const loading = ref(false);
+const historyLoading = ref(false);
 const error = ref("");
 const warning = ref("");
 const success = ref("");
 const result = ref(null);
-const previousState = ref(null);
+const lastFinalState = ref(null);
 
 const numericFields = [
   { key: "cpu_load", label: "CPU загрузка", min: 0, max: 100, step: 1, unit: "%" },
@@ -207,17 +247,20 @@ const form = reactive({
   service_state: "",
 });
 
-const loadPreviousState = async () => {
+const isEmpty = (value) => value === "" || value === null || value === undefined;
+
+const loadLastObservationState = async () => {
+  historyLoading.value = true;
   try {
-    const last = await getLastObservation();
-    previousState.value = last?.final_state || null;
+    const rows = await getObservations();
+    lastFinalState.value = rows?.length ? rows[0].final_state : null;
   } catch (err) {
     console.error(err);
-    previousState.value = null;
+    lastFinalState.value = null;
+  } finally {
+    historyLoading.value = false;
   }
 };
-
-const isEmpty = (value) => value === "" || value === null || value === undefined;
 
 const isFieldInvalid = (field) => {
   if (isEmpty(form[field.key])) return false;
@@ -226,11 +269,25 @@ const isFieldInvalid = (field) => {
   return Number.isNaN(value) || value < field.min || value > field.max;
 };
 
-const hasInvalidFields = () => numericFields.some((field) => isFieldInvalid(field));
+const validateForm = () => {
+  const invalidField = numericFields.find((field) => isFieldInvalid(field));
+  if (invalidField) {
+    return `Показатель «${invalidField.label}» должен быть в диапазоне от ${invalidField.min} до ${invalidField.max}.`;
+  }
+
+  const hasAtLeastOneValue =
+    numericFields.some((field) => !isEmpty(form[field.key])) || !isEmpty(form.service_state);
+
+  if (!hasAtLeastOneValue) {
+    return "Введите хотя бы один показатель для анализа.";
+  }
+
+  return null;
+};
 
 const buildPayload = () => {
   const payload = {
-    previous_state: previousState.value || null,
+    previous_state: lastFinalState.value || null,
   };
 
   for (const field of numericFields) {
@@ -249,7 +306,7 @@ const buildPayload = () => {
   return payload;
 };
 
-const runAnalysis = async () => {
+const runMonitoringAndSave = async () => {
   loading.value = true;
   error.value = "";
   warning.value = "";
@@ -257,40 +314,40 @@ const runAnalysis = async () => {
   result.value = null;
 
   try {
-    if (hasInvalidFields()) {
-      error.value = "Исправьте поля, выделенные красным.";
+    const validationError = validateForm();
+    if (validationError) {
+      error.value = validationError;
       return;
     }
 
     const payload = buildPayload();
+    const monitoringResult = await evaluateMonitoring(payload);
+    result.value = monitoringResult;
 
-    if (analysisMode.value === "expert") {
-      const monitoringResult = await evaluateMonitoring(payload);
-      result.value = monitoringResult;
+    try {
+      const resolvedInput = monitoringResult.resolved_input || payload;
 
-      try {
-        const resolved = monitoringResult.resolved_input;
+      await createObservation({
+        ...resolvedInput,
+        previous_state: lastFinalState.value || null,
+        final_state: monitoringResult.final_state,
+        dynamics: monitoringResult.dynamics,
+        diagnosis: monitoringResult.diagnosis,
+        explanation: monitoringResult.explanation,
+        indicator_results: (monitoringResult.indicator_results || []).map((item) => ({
+          indicator: item.indicator,
+          value: String(item.value),
+          severity: item.severity,
+        })),
+      });
 
-        await createObservation({
-          ...resolved,
-          previous_state: previousState.value || null,
-          final_state: monitoringResult.final_state,
-          dynamics: monitoringResult.dynamics,
-          diagnosis: monitoringResult.diagnosis,
-          explanation: monitoringResult.explanation,
-          indicator_results: monitoringResult.indicator_results,
-        });
-
-        success.value = "Наблюдение успешно сохранено в историю.";
-        previousState.value = monitoringResult.final_state;
-      } catch (saveErr) {
-        console.error(saveErr);
-        warning.value = "Анализ выполнен, но сохранить наблюдение в историю не удалось.";
-      }
-    } else {
-      const monitoringResult = await evaluateMonitoringMlStub(payload);
-      result.value = monitoringResult;
-      success.value = "Показан демонстрационный результат ML-модуля.";
+      success.value = "Наблюдение успешно сохранено в историю.";
+      lastFinalState.value = monitoringResult.final_state;
+    } catch (saveErr) {
+      console.error(saveErr);
+      warning.value =
+        saveErr?.response?.data?.detail ||
+        "Анализ выполнен, но сохранить наблюдение в историю не удалось.";
     }
   } catch (err) {
     console.error(err);
@@ -302,7 +359,7 @@ const runAnalysis = async () => {
 };
 
 onMounted(async () => {
-  await loadPreviousState();
+  await loadLastObservationState();
 });
 </script>
 
@@ -312,6 +369,7 @@ onMounted(async () => {
   flex-direction: column;
   gap: 20px;
 }
+
 .input-card,
 .details-card {
   background: white;
@@ -320,41 +378,25 @@ onMounted(async () => {
   box-shadow: 0 14px 30px rgba(15, 23, 42, 0.06);
   border: 1px solid #e2e8f0;
 }
+
 .section-header h2,
 .section-header h3 {
   margin: 0;
   color: #0f172a;
 }
+
 .section-header p {
   margin: 8px 0 0 0;
   color: #64748b;
 }
-.mode-switch {
-  display: flex;
-  gap: 12px;
-  margin-top: 22px;
-  margin-bottom: 22px;
-  flex-wrap: wrap;
-}
-.mode-btn {
-  border: 1px solid #cbd5e1;
-  background: white;
-  color: #334155;
-  padding: 12px 16px;
-  border-radius: 14px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.mode-btn.active {
-  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-  color: white;
-  border-color: transparent;
-}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(280px, 1fr));
   gap: 16px;
+  margin-top: 22px;
 }
+
 .field-card {
   border: 1px solid #e2e8f0;
   border-radius: 18px;
@@ -364,11 +406,13 @@ onMounted(async () => {
   flex-direction: column;
   gap: 8px;
 }
+
 .field-card span {
   font-size: 14px;
   font-weight: 700;
   color: #334155;
 }
+
 .number-input,
 .field-card select,
 .readonly-value {
@@ -380,29 +424,30 @@ onMounted(async () => {
   font-size: 15px;
   background: white;
 }
+
 .number-input.invalid {
   border-color: #ef4444;
   background: #fef2f2;
 }
-.readonly-card {
-  justify-content: flex-start;
-}
+
 .readonly-value {
   display: flex;
   align-items: center;
   color: #0f172a;
   font-weight: 700;
-  background: #ffffff;
 }
+
 .field-hint {
   font-size: 13px;
   color: #64748b;
 }
+
 .actions-row {
   margin-top: 22px;
   display: flex;
   justify-content: flex-end;
 }
+
 .primary-btn {
   border: none;
   border-radius: 14px;
@@ -413,30 +458,40 @@ onMounted(async () => {
   font-weight: 800;
   cursor: pointer;
 }
+
 .primary-btn:disabled {
   opacity: 0.7;
   cursor: not-allowed;
 }
+
 .success-message {
   margin-top: 14px;
   color: #0f766e;
   font-weight: 700;
 }
+
 .warning-message {
   margin-top: 14px;
   color: #b45309;
   font-weight: 700;
 }
+
 .error-message {
   margin-top: 14px;
   color: #dc2626;
   font-weight: 700;
 }
+
 .result-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 20px;
 }
+
+.inner-grid {
+  margin-top: 18px;
+}
+
 .result-card {
   background: white;
   border-radius: 22px;
@@ -444,69 +499,76 @@ onMounted(async () => {
   box-shadow: 0 14px 30px rgba(15, 23, 42, 0.06);
   border: 1px solid #e2e8f0;
 }
+
+.result-card.small {
+  padding: 18px;
+}
+
 .result-label {
   color: #64748b;
   font-size: 14px;
   margin-bottom: 10px;
 }
+
 .result-value {
   color: #0f172a;
   font-size: 22px;
   font-weight: 800;
 }
+
 .table-wrap {
   overflow: auto;
   margin-top: 18px;
 }
+
 .data-table {
   width: 100%;
   border-collapse: collapse;
 }
+
 .data-table th,
 .data-table td {
   padding: 14px 12px;
   border-bottom: 1px solid #e2e8f0;
   text-align: left;
 }
+
 .data-table th {
   color: #475569;
   font-size: 14px;
 }
+
 .explanation-text {
   margin: 18px 0 0 0;
   line-height: 1.7;
   color: #334155;
 }
-.stub-note {
-  margin-top: 16px;
-  background: #fff7ed;
-  border: 1px solid #fdba74;
-  color: #9a3412;
-  padding: 14px 16px;
-  border-radius: 14px;
-  font-weight: 600;
-}
+
 .probability-list {
   display: grid;
   gap: 14px;
   margin-top: 18px;
 }
+
 .probability-card {
   border: 1px solid #e2e8f0;
   border-radius: 16px;
   padding: 16px;
   background: #f8fafc;
 }
+
 .probability-name {
   font-weight: 700;
   color: #0f172a;
   margin-bottom: 8px;
 }
+
 .probability-value {
   color: #059669;
   font-weight: 800;
   margin-bottom: 8px;
 }
+
 .probability-bar {
   width: 100%;
   height: 10px;
@@ -514,20 +576,25 @@ onMounted(async () => {
   border-radius: 999px;
   overflow: hidden;
 }
+
 .probability-fill {
   height: 100%;
   background: linear-gradient(135deg, #10b981 0%, #059669 100%);
 }
+
 @media (max-width: 980px) {
   .form-grid {
     grid-template-columns: 1fr;
   }
+
   .result-grid {
     grid-template-columns: 1fr;
   }
+
   .actions-row {
     justify-content: stretch;
   }
+
   .primary-btn {
     width: 100%;
   }

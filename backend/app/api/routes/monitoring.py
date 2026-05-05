@@ -1,129 +1,157 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.ml.inference import predict_state
 from app.schemas.monitoring import MonitoringInput
 from app.services.expert_solver import ExpertSolver
 
 router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
+MONITORING_KEYS = [
+    "cpu_load",
+    "ram_usage",
+    "cpu_temp",
+    "disk_speed",
+    "disk_fill",
+    "network_bandwidth",
+    "process_count",
+    "service_state",
+]
 
-def _clamp(value: float, min_value: float, max_value: float) -> float:
-    return max(min_value, min(max_value, value))
+MISSING_LABELS = {
+    "cpu_load": "CPU загрузка",
+    "ram_usage": "RAM занятость",
+    "cpu_temp": "CPU температура",
+    "disk_speed": "Диск скорость",
+    "disk_fill": "Диск заполнение",
+    "network_bandwidth": "Сеть пропускная",
+    "process_count": "Процессы количество",
+    "service_state": "Сервисы состояние",
+}
+
+DEFAULTS = {
+    "cpu_load": 20,
+    "ram_usage": 35,
+    "cpu_temp": 45,
+    "disk_speed": 150,
+    "disk_fill": 40,
+    "network_bandwidth": 3000,
+    "process_count": 80,
+    "service_state": "Все работают",
+}
 
 
-def _resolved_ml_input(data: MonitoringInput) -> dict:
-    return {
-        "cpu_load": 20 if data.cpu_load is None else data.cpu_load,
-        "ram_usage": 35 if data.ram_usage is None else data.ram_usage,
-        "cpu_temp": 45 if data.cpu_temp is None else data.cpu_temp,
-        "disk_speed": 150 if data.disk_speed is None else data.disk_speed,
-        "disk_fill": 40 if data.disk_fill is None else data.disk_fill,
-        "network_bandwidth": 3000 if data.network_bandwidth is None else data.network_bandwidth,
-        "process_count": 80 if data.process_count is None else data.process_count,
-        "service_state": "Все работают" if data.service_state is None else data.service_state,
-        "previous_state": data.previous_state,
-    }
+def _count_provided(data: MonitoringInput) -> int:
+    return sum(1 for key in MONITORING_KEYS if getattr(data, key) is not None)
+
+
+def _missing_indicators(data: MonitoringInput) -> list[str]:
+    return [MISSING_LABELS[key] for key in MONITORING_KEYS if getattr(data, key) is None]
+
+
+def _resolved_expert_payload(data: MonitoringInput) -> dict:
+    payload = {"previous_state": data.previous_state}
+    for key in MONITORING_KEYS:
+        value = getattr(data, key)
+        payload[key] = DEFAULTS[key] if value is None else value
+    return payload
+
+
+def _raw_payload(data: MonitoringInput) -> dict:
+    payload = {"previous_state": data.previous_state}
+    for key in MONITORING_KEYS:
+        payload[key] = getattr(data, key)
+    return payload
 
 
 @router.post("/evaluate")
 def evaluate_monitoring(data: MonitoringInput, db: Session = Depends(get_db)):
+    provided_count = _count_provided(data)
+
+    if provided_count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Нужно ввести хотя бы один показатель для анализа",
+        )
+
     solver = ExpertSolver(db)
-    result = solver.evaluate(data.model_dump(exclude_none=True))
-    return result
 
+    missing_indicators = _missing_indicators(data)
 
-@router.post("/evaluate-ml-stub")
-def evaluate_monitoring_ml_stub(data: MonitoringInput):
-    """
-    Демонстрационная заглушка под будущую ML-модель.
-    Это НЕ машинное обучение, а временный имитатор ответа модели.
-    """
-
-    resolved = _resolved_ml_input(data)
-
-    cpu_risk = resolved["cpu_load"] / 100
-    ram_risk = resolved["ram_usage"] / 100
-    temp_risk = _clamp((resolved["cpu_temp"] - 20) / 100, 0, 1)
-    disk_speed_risk = 1 - _clamp(resolved["disk_speed"] / 1000, 0, 1)
-    disk_fill_risk = resolved["disk_fill"] / 100
-    network_risk = 1 - _clamp(resolved["network_bandwidth"] / 10000, 0, 1)
-    process_risk = resolved["process_count"] / 1000
-
-    service_risk_map = {
-        "Все работают": 0.0,
-        "Некоторые остановлены": 0.5,
-        "Критический сервис остановлен": 1.0,
-    }
-    service_risk = service_risk_map.get(resolved["service_state"], 0.0)
-
-    risk_score = (
-        cpu_risk * 0.15
-        + ram_risk * 0.15
-        + temp_risk * 0.20
-        + disk_speed_risk * 0.10
-        + disk_fill_risk * 0.10
-        + network_risk * 0.10
-        + process_risk * 0.10
-        + service_risk * 0.10
-    )
-
-    if risk_score < 0.30:
-        final_state = "Хорошее"
-        diagnosis = "Исправен"
-    elif risk_score < 0.55:
-        final_state = "Критическое"
-        diagnosis = "Требует внимания"
-    else:
-        final_state = "Критическое с риском отказа"
-        diagnosis = "Требует обслуживания"
-
-    missing_indicators = []
-    if data.cpu_load is None:
-        missing_indicators.append("CPU загрузка")
-    if data.ram_usage is None:
-        missing_indicators.append("RAM занятость")
-    if data.cpu_temp is None:
-        missing_indicators.append("CPU температура")
-    if data.disk_speed is None:
-        missing_indicators.append("Диск скорость")
-    if data.disk_fill is None:
-        missing_indicators.append("Диск заполнение")
-    if data.network_bandwidth is None:
-        missing_indicators.append("Сеть пропускная")
-    if data.process_count is None:
-        missing_indicators.append("Процессы количество")
-    if data.service_state is None:
-        missing_indicators.append("Сервисы состояние")
-
-    explanation = (
-        "Показан демонстрационный результат модуля машинного обучения. "
-        "Реальная ML-модель пока не подключена. "
-    )
+    # 1) Экспертная система всегда считается
+    expert_payload = _resolved_expert_payload(data)
+    expert_result = solver.evaluate(expert_payload)
 
     if missing_indicators:
-        explanation += (
-            "Часть признаков не была введена. "
-            "Для расчёта заглушка использовала нейтральные значения: "
+        expert_result["explanation"] += (
+            " Часть показателей не была введена пользователем. "
+            "Для экспертной системы использовано допущение об оптимальном состоянии: "
             + ", ".join(missing_indicators)
             + "."
         )
 
-    probabilities = [
-        {"label": "Исправен", "value": round(max(0.0, 1.0 - risk_score * 1.35), 3)},
-        {"label": "Требует внимания", "value": round(max(0.0, 0.65 - abs(risk_score - 0.45)), 3)},
-        {"label": "Требует обслуживания", "value": round(min(1.0, risk_score * 1.15), 3)},
-    ]
+    # 2) МО тоже всегда считается
+    ml_payload = _raw_payload(data)
+    ml_result = predict_state(ml_payload)
+
+    # Динамика для МО только если есть previous_state
+    if data.previous_state:
+        ml_dynamics = solver.detect_dynamics(
+            ml_result["final_state"],
+            data.previous_state,
+        )
+    else:
+        ml_dynamics = None
+
+    ml_diagnosis = solver.detect_diagnosis(
+        ml_result["final_state"],
+        ml_dynamics,
+    )
+
+    ml_result["dynamics"] = ml_dynamics
+    ml_result["diagnosis"] = ml_diagnosis
+
+    if missing_indicators:
+        ml_result["explanation"] += (
+            " Модель машинного обучения использована для уточнения результата, "
+            "так как часть показателей отсутствовала."
+        )
+    else:
+        ml_result["explanation"] += (
+            " Модель машинного обучения рассчитана параллельно с экспертной системой "
+            "для сравнения результатов."
+        )
+
+    # 3) Кто даёт итоговый ответ
+    expert_is_decisive = provided_count == len(MONITORING_KEYS)
+    final_source = "expert" if expert_is_decisive else "ml"
+    final_result = expert_result if expert_is_decisive else ml_result
+
+    if final_source == "expert":
+        final_explanation = (
+            "Итоговый ответ принят по результату экспертной системы, "
+            "так как все показатели были введены и экспертная система "
+            "однозначно определила состояние компьютера."
+        )
+    else:
+        final_explanation = (
+            "Итоговый ответ принят по результату модели машинного обучения, "
+            "так как часть показателей не была введена и экспертная система "
+            "использовала допущение об оптимальном состоянии пропущенных признаков."
+        )
 
     return {
-        "mode": "ml_stub",
-        "indicator_results": [],
-        "final_state": final_state,
-        "dynamics": None,
-        "diagnosis": diagnosis,
-        "explanation": explanation,
-        "model_message": "ML-модель пока не обучена и не подключена. Показан демонстрационный результат.",
-        "probabilities": probabilities,
+        "mode": "expert_and_ml",
+        "final_source": final_source,
+        "final_state": final_result["final_state"],
+        "dynamics": final_result.get("dynamics"),
+        "diagnosis": final_result["diagnosis"],
+        "explanation": final_explanation,
         "missing_indicators": missing_indicators,
-        "resolved_input": resolved,
+        "indicator_results": expert_result["indicator_results"],
+        "expert_result": expert_result,
+        "ml_result": ml_result,
+        "resolved_input": expert_payload,
+        "raw_input": ml_payload,
     }

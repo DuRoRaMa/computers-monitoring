@@ -117,7 +117,6 @@ def move_severity_name(
         raise HTTPException(status_code=404, detail="Степень тяжести не найдена")
 
     direction = payload.direction.strip().lower()
-
     if direction not in {"up", "down"}:
         raise HTTPException(status_code=400, detail="Направление должно быть up или down")
 
@@ -130,10 +129,30 @@ def move_severity_name(
             return {"message": "Степень тяжести уже имеет наименьший приоритет"}
         target = rows[index + 1]
 
-    severity.order_number, target.order_number = target.order_number, severity.order_number
-    db.commit()
+    try:
+        current_order = severity.order_number
+        target_order = target.order_number
 
-    return {"message": "Приоритет степени тяжести обновлён"}
+        # временное уникальное значение, которого точно нет
+        temp_order = max(item.order_number for item in rows) + 1000
+
+        # шаг 1: уводим текущую запись во временное значение
+        severity.order_number = temp_order
+        db.flush()
+
+        # шаг 2: ставим соседу старый порядок текущей записи
+        target.order_number = current_order
+        db.flush()
+
+        # шаг 3: возвращаем текущей записи порядок соседа
+        severity.order_number = target_order
+        db.commit()
+
+        return {"message": "Приоритет степени тяжести обновлён"}
+    except Exception:
+        db.rollback()
+        raise
+
 
 def parse_value_text(value_text: str) -> dict:
     text = value_text.strip()

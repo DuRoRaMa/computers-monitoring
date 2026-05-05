@@ -14,7 +14,7 @@ class MonitoringInput(BaseModel):
 
     @field_validator("service_state")
     @classmethod
-    def validate_service_state(cls, value: str | None):
+    def validate_service_state(cls, value: str | None) -> str | None:
         if value is None:
             return value
 
@@ -24,5 +24,9 @@ class MonitoringInput(BaseModel):
             "Критический сервис остановлен",
         }
         if value not in allowed:
-            raise ValueError("Некорректное состояние сервисов")
+            raise ValueError(
+                "service_state должен быть одним из значений: "
+                "'Все работают', 'Некоторые остановлены', "
+                "'Критический сервис остановлен'"
+            )
         return value

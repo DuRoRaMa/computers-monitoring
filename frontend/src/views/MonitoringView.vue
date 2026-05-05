@@ -3,48 +3,33 @@
     <section class="input-card">
       <div class="section-header">
         <h2>Мониторинг состояния</h2>
-        <p>Введите значения показателей, запустите анализ и сохраните наблюдение</p>
+        <p>
+          Можно вводить не все показатели. При неполном вводе дополнительно
+          используется модуль машинного обучения.
+        </p>
       </div>
 
       <div class="form-grid">
-        <label class="field">
-          <span>CPU загрузка</span>
-          <input v-model.number="form.cpu_load" type="number" min="0" max="100" />
-        </label>
-
-        <label class="field">
-          <span>RAM занятость</span>
-          <input v-model.number="form.ram_usage" type="number" min="0" max="100" />
-        </label>
-
-        <label class="field">
-          <span>CPU температура</span>
-          <input v-model.number="form.cpu_temp" type="number" min="0" max="150" />
-        </label>
-
-        <label class="field">
-          <span>Диск скорость</span>
-          <input v-model.number="form.disk_speed" type="number" min="0" />
-        </label>
-
-        <label class="field">
-          <span>Диск заполнение</span>
-          <input v-model.number="form.disk_fill" type="number" min="0" max="100" />
-        </label>
-
-        <label class="field">
-          <span>Сеть пропускная</span>
-          <input v-model.number="form.network_bandwidth" type="number" min="0" />
-        </label>
-
-        <label class="field">
-          <span>Процессы количество</span>
-          <input v-model.number="form.process_count" type="number" min="0" />
+        <label v-for="field in numericFields" :key="field.key" class="field">
+          <span>{{ field.label }}</span>
+          <input
+            v-model="form[field.key]"
+            :class="{ invalid: isFieldInvalid(field) }"
+            type="number"
+            :min="field.min"
+            :max="field.max"
+            :step="field.step"
+            :placeholder="`${field.min} – ${field.max}`"
+          />
+          <small class="field-hint">
+            Диапазон: {{ field.min }} – {{ field.max }} {{ field.unit }}
+          </small>
         </label>
 
         <label class="field">
           <span>Сервисы состояние</span>
           <select v-model="form.service_state">
+            <option value="">Не указано</option>
             <option>Все работают</option>
             <option>Некоторые остановлены</option>
             <option>Критический сервис остановлен</option>
@@ -81,20 +66,26 @@
       </div>
 
       <div v-if="success" class="success-message">{{ success }}</div>
+      <div v-if="warning" class="warning-message">{{ warning }}</div>
       <div v-if="error" class="error-message">{{ error }}</div>
     </section>
 
+    <!-- Итог верхнего уровня -->
     <section v-if="result" class="result-grid">
       <div class="result-card">
-        <div class="result-label">Итоговое состояние</div>
-        <div class="result-value">{{ result.final_state }}</div>
+        <div class="result-label">Режим анализа</div>
+        <div class="result-value">
+          {{
+            result.mode === "expert_plus_ml"
+              ? "Экспертная система + МО"
+              : "Экспертная система"
+          }}
+        </div>
       </div>
 
       <div class="result-card">
-        <div class="result-label">Динамика</div>
-        <div class="result-value">
-          {{ result.dynamics ?? "Не определялась" }}
-        </div>
+        <div class="result-label">Итоговое состояние</div>
+        <div class="result-value">{{ result.final_state }}</div>
       </div>
 
       <div class="result-card">
@@ -103,7 +94,60 @@
       </div>
     </section>
 
-    <section v-if="result" class="details-card">
+    <!-- Пропущенные признаки -->
+    <section
+      v-if="result?.missing_indicators && result.missing_indicators.length"
+      class="details-card"
+    >
+      <div class="section-header">
+        <h3>Незаполненные показатели</h3>
+      </div>
+
+      <p class="explanation-text">
+        Пользователь не ввёл следующие показатели:
+        {{ result.missing_indicators.join(", ") }}.
+      </p>
+    </section>
+
+    <!-- Результат экспертной системы -->
+    <section v-if="result?.expert_result || result" class="details-card">
+      <div class="section-header">
+        <h3>Результат экспертной системы</h3>
+      </div>
+
+      <div class="result-grid inner-grid">
+        <div class="result-card small">
+          <div class="result-label">Состояние</div>
+          <div class="result-value">
+            {{ (result.expert_result || result).final_state }}
+          </div>
+        </div>
+
+        <div class="result-card small">
+          <div class="result-label">Динамика</div>
+          <div class="result-value">
+            {{ (result.expert_result || result).dynamics ?? "Не определялась" }}
+          </div>
+        </div>
+
+        <div class="result-card small">
+          <div class="result-label">Диагноз</div>
+          <div class="result-value">
+            {{ (result.expert_result || result).diagnosis }}
+          </div>
+        </div>
+      </div>
+
+      <p class="explanation-text">
+        {{ (result.expert_result || result).explanation }}
+      </p>
+    </section>
+
+    <!-- Детализация по показателям -->
+    <section
+      v-if="result && result.indicator_results && result.indicator_results.length"
+      class="details-card"
+    >
       <div class="section-header">
         <h3>Детализация по показателям</h3>
       </div>
@@ -128,14 +172,54 @@
       </div>
     </section>
 
-    <section v-if="result" class="details-card">
+    <!-- Результат МО -->
+    <section v-if="result?.ml_result" class="details-card">
       <div class="section-header">
-        <h3>Объяснение системы</h3>
+        <h3>Результат модуля машинного обучения</h3>
+      </div>
+
+      <div class="result-grid inner-grid">
+        <div class="result-card small">
+          <div class="result-label">Состояние</div>
+          <div class="result-value">{{ result.ml_result.final_state }}</div>
+        </div>
+
+        <div class="result-card small">
+          <div class="result-label">Динамика</div>
+          <div class="result-value">
+            {{ result.ml_result.dynamics ?? "Не определялась" }}
+          </div>
+        </div>
+
+        <div class="result-card small">
+          <div class="result-label">Диагноз</div>
+          <div class="result-value">{{ result.ml_result.diagnosis }}</div>
+        </div>
       </div>
 
       <p class="explanation-text">
-        {{ result.explanation }}
+        {{ result.ml_result.explanation }}
       </p>
+
+      <div
+        v-if="result.ml_result.probabilities && result.ml_result.probabilities.length"
+        class="probability-list"
+      >
+        <div
+          v-for="item in result.ml_result.probabilities"
+          :key="item.label"
+          class="probability-card"
+        >
+          <div class="probability-name">{{ item.label }}</div>
+          <div class="probability-value">{{ Math.round(item.value * 100) }}%</div>
+          <div class="probability-bar">
+            <div
+              class="probability-fill"
+              :style="{ width: `${Math.round(item.value * 100)}%` }"
+            />
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 </template>
@@ -148,21 +232,41 @@ import { createObservation, getObservations } from "../../api/observations";
 const loading = ref(false);
 const historyLoading = ref(false);
 const error = ref("");
+const warning = ref("");
 const success = ref("");
 const result = ref(null);
 const lastFinalState = ref(null);
 const historyHint = ref("");
 
+const numericFields = [
+  { key: "cpu_load", label: "CPU загрузка", min: 0, max: 100, step: 1, unit: "%" },
+  { key: "ram_usage", label: "RAM занятость", min: 0, max: 100, step: 1, unit: "%" },
+  { key: "cpu_temp", label: "CPU температура", min: 20, max: 120, step: 1, unit: "°C" },
+  { key: "disk_speed", label: "Диск скорость", min: 0, max: 1000, step: 1, unit: "МБ/с" },
+  { key: "disk_fill", label: "Диск заполнение", min: 0, max: 100, step: 1, unit: "%" },
+  {
+    key: "network_bandwidth",
+    label: "Сеть пропускная",
+    min: 0,
+    max: 10000,
+    step: 10,
+    unit: "Мбит/с",
+  },
+  { key: "process_count", label: "Процессы количество", min: 0, max: 1000, step: 1, unit: "" },
+];
+
 const form = reactive({
-  cpu_load: 20,
-  ram_usage: 35,
-  cpu_temp: 45,
-  disk_speed: 150,
-  disk_fill: 40,
-  network_bandwidth: 3000,
-  process_count: 80,
-  service_state: "Все работают",
+  cpu_load: "",
+  ram_usage: "",
+  cpu_temp: "",
+  disk_speed: "",
+  disk_fill: "",
+  network_bandwidth: "",
+  process_count: "",
+  service_state: "",
 });
+
+const isEmpty = (value) => value === "" || value === null || value === undefined;
 
 const loadLastObservationState = async () => {
   historyLoading.value = true;
@@ -181,34 +285,54 @@ const loadLastObservationState = async () => {
   }
 };
 
+const isFieldInvalid = (field) => {
+  if (isEmpty(form[field.key])) return false;
+
+  const value = Number(form[field.key]);
+  return Number.isNaN(value) || value < field.min || value > field.max;
+};
+
 const validateForm = () => {
-  if (form.cpu_load < 0 || form.cpu_load > 100) {
-    return "CPU загрузка должна быть в диапазоне от 0 до 100.";
+  const invalidField = numericFields.find((field) => isFieldInvalid(field));
+  if (invalidField) {
+    return `Показатель «${invalidField.label}» должен быть в диапазоне от ${invalidField.min} до ${invalidField.max}.`;
   }
 
-  if (form.ram_usage < 0 || form.ram_usage > 100) {
-    return "RAM занятость должна быть в диапазоне от 0 до 100.";
-  }
+  const hasAtLeastOneValue =
+    numericFields.some((field) => !isEmpty(form[field.key])) || !isEmpty(form.service_state);
 
-  if (form.disk_fill < 0 || form.disk_fill > 100) {
-    return "Диск заполнение должно быть в диапазоне от 0 до 100.";
-  }
-
-  if (
-    form.cpu_temp < 0 ||
-    form.disk_speed < 0 ||
-    form.network_bandwidth < 0 ||
-    form.process_count < 0
-  ) {
-    return "Числовые показатели не могут быть отрицательными.";
+  if (!hasAtLeastOneValue) {
+    return "Введите хотя бы один показатель для анализа.";
   }
 
   return null;
 };
 
+const buildPayload = () => {
+  const payload = {
+    previous_state: lastFinalState.value || null,
+  };
+
+  for (const field of numericFields) {
+    if (!isEmpty(form[field.key])) {
+      payload[field.key] =
+        field.key === "process_count"
+          ? Math.round(Number(form[field.key]))
+          : Number(form[field.key]);
+    }
+  }
+
+  if (!isEmpty(form.service_state)) {
+    payload.service_state = form.service_state;
+  }
+
+  return payload;
+};
+
 const runMonitoringAndSave = async () => {
   loading.value = true;
   error.value = "";
+  warning.value = "";
   success.value = "";
   result.value = null;
 
@@ -219,29 +343,28 @@ const runMonitoringAndSave = async () => {
       return;
     }
 
-    const payload = {
-      ...form,
-      previous_state: lastFinalState.value || null,
-    };
-
+    const payload = buildPayload();
     const monitoringResult = await evaluateMonitoring(payload);
     result.value = monitoringResult;
 
     try {
+      const resolvedInput = monitoringResult.resolved_input || payload;
+
       await createObservation({
-        ...payload,
+        ...resolvedInput,
+        previous_state: lastFinalState.value || null,
         final_state: monitoringResult.final_state,
         dynamics: monitoringResult.dynamics,
         diagnosis: monitoringResult.diagnosis,
         explanation: monitoringResult.explanation,
-        indicator_results: monitoringResult.indicator_results,
+        indicator_results: monitoringResult.indicator_results || [],
       });
 
       success.value = "Наблюдение успешно сохранено в историю.";
       lastFinalState.value = monitoringResult.final_state;
     } catch (saveErr) {
       console.error(saveErr);
-      error.value =
+      warning.value =
         saveErr?.response?.data?.detail ||
         "Анализ выполнен, но сохранить наблюдение в историю не удалось.";
     }
@@ -318,6 +441,11 @@ onMounted(async () => {
   background: white;
 }
 
+.field input.invalid {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
 .readonly-value {
   background: #f8fafc;
   color: #0f172a;
@@ -361,6 +489,12 @@ onMounted(async () => {
   font-weight: 700;
 }
 
+.warning-message {
+  margin-top: 14px;
+  color: #b45309;
+  font-weight: 700;
+}
+
 .error-message {
   margin-top: 14px;
   color: #dc2626;
@@ -373,12 +507,20 @@ onMounted(async () => {
   gap: 20px;
 }
 
+.inner-grid {
+  margin-top: 18px;
+}
+
 .result-card {
   background: white;
   border-radius: 22px;
   padding: 22px;
   box-shadow: 0 14px 30px rgba(15, 23, 42, 0.06);
   border: 1px solid #e2e8f0;
+}
+
+.result-card.small {
+  padding: 18px;
 }
 
 .result-label {
@@ -421,6 +563,44 @@ onMounted(async () => {
   color: #334155;
 }
 
+.probability-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.probability-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 16px;
+  background: #f8fafc;
+}
+
+.probability-name {
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+
+.probability-value {
+  color: #059669;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.probability-bar {
+  width: 100%;
+  height: 10px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.probability-fill {
+  height: 100%;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+}
+
 @media (max-width: 980px) {
   .form-grid {
     grid-template-columns: 1fr;
@@ -428,6 +608,14 @@ onMounted(async () => {
 
   .result-grid {
     grid-template-columns: 1fr;
+  }
+
+  .actions-row {
+    justify-content: stretch;
+  }
+
+  .primary-btn {
+    width: 100%;
   }
 }
 </style>
