@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -18,15 +19,19 @@ router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 # =========================
 # Pydantic payloads
 # =========================
+
 class MoveSeverityPayload(BaseModel):
     direction: str
+
 
 class NamePayload(BaseModel):
     name: str
 
+
 class IndicatorPayload(BaseModel):
     name: str
     value_type: str
+
 
 class ValueTextPayload(BaseModel):
     indicator_id: int
@@ -41,6 +46,10 @@ class StateCharacteristicPayload(BaseModel):
 class RuleRowPayload(BaseModel):
     indicator_id: int
     value_text: str
+
+
+class NormalValuesPayload(BaseModel):
+    rows: list[RuleRowPayload]
 
 
 class SeverityValuesPayload(BaseModel):
@@ -60,6 +69,7 @@ class DiagnosisValuesPayload(BaseModel):
 def normalize_name(name: str) -> str:
     return name.strip()
 
+
 def normalize_indicator_type(value_type: str) -> str:
     value = value_type.strip().lower()
 
@@ -71,87 +81,43 @@ def normalize_indicator_type(value_type: str) -> str:
 
     return value
 
-def validate_parsed_value_for_indicator(indicator: Indicator, parsed: dict):
-    if indicator.value_type == "numeric" and parsed["value_kind"] != "range":
-        raise HTTPException(
-            status_code=400,
-            detail=f'Для показателя "{indicator.name}" разрешён только диапазон',
-        )
-
-    if indicator.value_type == "categorical" and parsed["value_kind"] != "scalar":
-        raise HTTPException(
-            status_code=400,
-            detail=f'Для показателя "{indicator.name}" разрешено только текстовое значение',
-        )
 
 def float_to_text(value: float | None) -> str:
     if value is None:
         return ""
+
     if float(value).is_integer():
         return str(int(value))
+
     return str(value)
 
 
-def format_value(value_kind: str, min_value, max_value, min_inclusive, max_inclusive, scalar_value) -> str:
+def format_value(
+    value_kind: str,
+    min_value,
+    max_value,
+    min_inclusive,
+    max_inclusive,
+    scalar_value,
+) -> str:
     if value_kind == "scalar":
         return scalar_value or ""
 
     left = "[" if min_inclusive else "("
     right = "]" if max_inclusive else ")"
+
     return f"{left}{float_to_text(min_value)};{float_to_text(max_value)}{right}"
 
-@router.post("/severity-names/{severity_id}/move")
-def move_severity_name(
-    severity_id: int,
-    payload: MoveSeverityPayload,
-    db: Session = Depends(get_db),
-):
-    severity = db.query(SeverityName).filter(SeverityName.id == severity_id).first()
-    if not severity:
-        raise HTTPException(status_code=404, detail="Степень тяжести не найдена")
 
-    rows = db.query(SeverityName).order_by(SeverityName.order_number).all()
-    index = next((i for i, item in enumerate(rows) if item.id == severity_id), None)
-
-    if index is None:
-        raise HTTPException(status_code=404, detail="Степень тяжести не найдена")
-
-    direction = payload.direction.strip().lower()
-    if direction not in {"up", "down"}:
-        raise HTTPException(status_code=400, detail="Направление должно быть up или down")
-
-    if direction == "up":
-        if index == 0:
-            return {"message": "Степень тяжести уже имеет наивысший приоритет"}
-        target = rows[index - 1]
-    else:
-        if index == len(rows) - 1:
-            return {"message": "Степень тяжести уже имеет наименьший приоритет"}
-        target = rows[index + 1]
-
-    try:
-        current_order = severity.order_number
-        target_order = target.order_number
-
-        # временное уникальное значение, которого точно нет
-        temp_order = max(item.order_number for item in rows) + 1000
-
-        # шаг 1: уводим текущую запись во временное значение
-        severity.order_number = temp_order
-        db.flush()
-
-        # шаг 2: ставим соседу старый порядок текущей записи
-        target.order_number = current_order
-        db.flush()
-
-        # шаг 3: возвращаем текущей записи порядок соседа
-        severity.order_number = target_order
-        db.commit()
-
-        return {"message": "Приоритет степени тяжести обновлён"}
-    except Exception:
-        db.rollback()
-        raise
+def format_row_value(row) -> str:
+    return format_value(
+        row.value_kind,
+        row.min_value,
+        row.max_value,
+        row.min_inclusive,
+        row.max_inclusive,
+        row.scalar_value,
+    )
 
 
 def parse_value_text(value_text: str) -> dict:
@@ -169,14 +135,33 @@ def parse_value_text(value_text: str) -> dict:
     ):
         inner = text[1:-1]
         parts = inner.split(";")
+
         if len(parts) != 2:
-            raise HTTPException(status_code=400, detail=f"Некорректный интервал: {text}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Некорректный интервал: {text}",
+            )
 
         try:
             min_value = float(parts[0].replace(",", ".").strip())
             max_value = float(parts[1].replace(",", ".").strip())
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Некорректные числа в интервале: {text}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Некорректные числа в интервале: {text}",
+            )
+
+        if min_value > max_value:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Левая граница интервала не может быть больше правой: {text}",
+            )
+
+        if min_value == max_value and (text[0] == "(" or text[-1] == ")"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Пустой интервал недопустим: {text}",
+            )
 
         return {
             "value_kind": "range",
@@ -187,7 +172,7 @@ def parse_value_text(value_text: str) -> dict:
             "scalar_value": None,
         }
 
-    # Иначе считаем это скалярным значением
+    # Иначе считаем это скалярным значением.
     return {
         "value_kind": "scalar",
         "min_value": None,
@@ -198,9 +183,129 @@ def parse_value_text(value_text: str) -> dict:
     }
 
 
+def validate_parsed_value_for_indicator(indicator: Indicator, parsed: dict):
+    if indicator.value_type == "numeric" and parsed["value_kind"] != "range":
+        raise HTTPException(
+            status_code=400,
+            detail=f'Для показателя "{indicator.name}" разрешён только диапазон',
+        )
+
+    if indicator.value_type == "categorical" and parsed["value_kind"] != "scalar":
+        raise HTTPException(
+            status_code=400,
+            detail=f'Для показателя "{indicator.name}" разрешено только текстовое значение',
+        )
+
+
+def range_contains_range(possible_value: PossibleValue, parsed: dict) -> bool:
+    """Проверяет, что parsed-диапазон входит внутрь possible_value."""
+
+    if possible_value.value_kind != "range" or parsed["value_kind"] != "range":
+        return False
+
+    # Левая граница.
+    if parsed["min_value"] < possible_value.min_value:
+        return False
+
+    if (
+        parsed["min_value"] == possible_value.min_value
+        and parsed["min_inclusive"]
+        and not possible_value.min_inclusive
+    ):
+        return False
+
+    # Правая граница.
+    if parsed["max_value"] > possible_value.max_value:
+        return False
+
+    if (
+        parsed["max_value"] == possible_value.max_value
+        and parsed["max_inclusive"]
+        and not possible_value.max_inclusive
+    ):
+        return False
+
+    return True
+
+
+def scalar_is_allowed(possible_value: PossibleValue, parsed: dict) -> bool:
+    if possible_value.value_kind != "scalar" or parsed["value_kind"] != "scalar":
+        return False
+
+    return str(possible_value.scalar_value).strip() == str(parsed["scalar_value"]).strip()
+
+
+def get_possible_values_for_indicator(db: Session, indicator_id: int) -> list[PossibleValue]:
+    return (
+        db.query(PossibleValue)
+        .filter(PossibleValue.indicator_id == indicator_id)
+        .order_by(PossibleValue.id)
+        .all()
+    )
+
+
+def get_possible_value_texts_for_indicator(db: Session, indicator_id: int) -> list[str]:
+    return [
+        format_row_value(row)
+        for row in get_possible_values_for_indicator(db, indicator_id)
+    ]
+
+
+def validate_value_inside_possible_values(
+    db: Session,
+    indicator: Indicator,
+    parsed: dict,
+) -> None:
+    """
+    Проверка главного ограничения:
+    нормальные значения, значения степеней тяжести и значения диагнозов
+    должны входить в возможное значение показателя.
+    """
+
+    possible_values = get_possible_values_for_indicator(db, indicator.id)
+
+    if not possible_values:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Сначала задайте возможное значение для показателя: {indicator.name}",
+        )
+
+    if parsed["value_kind"] == "range":
+        is_valid = any(
+            range_contains_range(possible_value, parsed)
+            for possible_value in possible_values
+        )
+    else:
+        is_valid = any(
+            scalar_is_allowed(possible_value, parsed)
+            for possible_value in possible_values
+        )
+
+    if not is_valid:
+        allowed = ", ".join(format_row_value(row) for row in possible_values)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Значение для показателя «{indicator.name}» должно входить "
+                f"в возможное значение: {allowed}"
+            ),
+        )
+
+
 def get_state_characteristic_map(db: Session, diagnosis_id: int) -> dict[int, int]:
-    rows = db.query(StateCharacteristic).filter(StateCharacteristic.diagnosis_id == diagnosis_id).all()
+    rows = (
+        db.query(StateCharacteristic)
+        .filter(StateCharacteristic.diagnosis_id == diagnosis_id)
+        .all()
+    )
+
     return {row.indicator_id: row.id for row in rows}
+
+
+def add_if_not_exists(db: Session, model, **kwargs):
+    exists = db.query(model).filter_by(**kwargs).first()
+    if not exists:
+        db.add(model(**kwargs))
 
 
 # =========================
@@ -242,17 +347,20 @@ def seed_basic_knowledge(db: Session = Depends(get_db)):
 
     for name in diagnosis_names:
         name = normalize_name(name)
+
         exists = db.query(Diagnosis).filter(Diagnosis.name == name).first()
         if not exists:
             db.add(Diagnosis(name=name))
 
     for name, order_number in severity_names:
         name = normalize_name(name)
+
         exists = db.query(SeverityName).filter(SeverityName.name == name).first()
         if not exists:
             db.add(SeverityName(name=name, order_number=order_number))
 
     db.commit()
+
     return {"message": "Базовые знания успешно добавлены"}
 
 
@@ -268,11 +376,6 @@ def seed_rules(db: Session = Depends(get_db)):
             detail="Сначала вызови /knowledge/seed-basic",
         )
 
-    def add_if_not_exists(model, **kwargs):
-        exists = db.query(model).filter_by(**kwargs).first()
-        if not exists:
-            db.add(model(**kwargs))
-
     # possible_value
     range_possible = {
         "CPU загрузка": (0, 100),
@@ -286,6 +389,7 @@ def seed_rules(db: Session = Depends(get_db)):
 
     for indicator_name, (min_v, max_v) in range_possible.items():
         add_if_not_exists(
+            db,
             PossibleValue,
             indicator_id=indicators[indicator_name],
             value_kind="range",
@@ -302,6 +406,7 @@ def seed_rules(db: Session = Depends(get_db)):
         "Критический сервис остановлен",
     ]:
         add_if_not_exists(
+            db,
             PossibleValue,
             indicator_id=indicators["Сервисы состояние"],
             value_kind="scalar",
@@ -316,15 +421,16 @@ def seed_rules(db: Session = Depends(get_db)):
     normal_ranges = {
         "CPU загрузка": (0, 30),
         "RAM занятость": (0, 40),
-        "CPU температура": (20, 60),
-        "Диск скорость": (100, 1000),
+        "CPU температура": (20, 50),
+        "Диск скорость": (80, 1000),
         "Диск заполнение": (0, 70),
         "Сеть пропускная": (0, 8000),
-        "Процессы количество": (30, 200),
+        "Процессы количество": (30, 100),
     }
 
     for indicator_name, (min_v, max_v) in normal_ranges.items():
         add_if_not_exists(
+            db,
             NormalValue,
             indicator_id=indicators[indicator_name],
             value_kind="range",
@@ -336,6 +442,7 @@ def seed_rules(db: Session = Depends(get_db)):
         )
 
     add_if_not_exists(
+        db,
         NormalValue,
         indicator_id=indicators["Сервисы состояние"],
         value_kind="scalar",
@@ -386,6 +493,7 @@ def seed_rules(db: Session = Depends(get_db)):
 
     for indicator_name, severity_name, kind, min_v, max_v, min_inc, max_inc, scalar in severity_rules:
         add_if_not_exists(
+            db,
             SeverityValue,
             indicator_id=indicators[indicator_name],
             severity_name_id=severities[severity_name],
@@ -403,6 +511,7 @@ def seed_rules(db: Session = Depends(get_db)):
         ("Критическое с риском отказа", "Критический сервис остановлен"),
     ]:
         add_if_not_exists(
+            db,
             SeverityValue,
             indicator_id=indicators["Сервисы состояние"],
             severity_name_id=severities[severity_name],
@@ -432,9 +541,13 @@ def seed_rules(db: Session = Depends(get_db)):
     for indicator_name in characteristic_indicators:
         exists = (
             db.query(StateCharacteristic)
-            .filter_by(diagnosis_id=diagnosis_id, indicator_id=indicators[indicator_name])
+            .filter_by(
+                diagnosis_id=diagnosis_id,
+                indicator_id=indicators[indicator_name],
+            )
             .first()
         )
+
         if not exists:
             db.add(
                 StateCharacteristic(
@@ -455,10 +568,12 @@ def seed_rules(db: Session = Depends(get_db)):
         ("Диск заполнение", 85, 100, False, True),
         ("Сеть пропускная", 9000, 10000, False, True),
         ("Процессы количество", 200, 1000, False, True),
+        ("Процессы количество", 0, 10, True, False),
     ]
 
     for indicator_name, min_v, max_v, min_inc, max_inc in diagnosis_range_rules:
         add_if_not_exists(
+            db,
             DiagnosisValue,
             state_characteristic_id=state_map[indicators[indicator_name]],
             value_kind="range",
@@ -471,6 +586,7 @@ def seed_rules(db: Session = Depends(get_db)):
 
     for scalar in ["Некоторые остановлены", "Критический сервис остановлен"]:
         add_if_not_exists(
+            db,
             DiagnosisValue,
             state_characteristic_id=state_map[indicators["Сервисы состояние"]],
             value_kind="scalar",
@@ -482,6 +598,7 @@ def seed_rules(db: Session = Depends(get_db)):
         )
 
     db.commit()
+
     return {"message": "Правила успешно добавлены"}
 
 
@@ -498,8 +615,12 @@ def get_diagnoses(db: Session = Depends(get_db)):
 @router.post("/diagnoses")
 def create_diagnosis(payload: NamePayload, db: Session = Depends(get_db)):
     name = normalize_name(payload.name)
+
     if not name:
-        raise HTTPException(status_code=400, detail="Название диагноза не может быть пустым")
+        raise HTTPException(
+            status_code=400,
+            detail="Название диагноза не может быть пустым",
+        )
 
     exists = db.query(Diagnosis).filter(Diagnosis.name == name).first()
     if exists:
@@ -509,22 +630,33 @@ def create_diagnosis(payload: NamePayload, db: Session = Depends(get_db)):
     db.add(item)
     db.commit()
     db.refresh(item)
+
     return {"id": item.id, "name": item.name}
 
 
 @router.delete("/diagnoses/{diagnosis_id}")
 def delete_diagnosis(diagnosis_id: int, db: Session = Depends(get_db)):
     diagnosis = db.query(Diagnosis).filter(Diagnosis.id == diagnosis_id).first()
+
     if not diagnosis:
         raise HTTPException(status_code=404, detail="Диагноз не найден")
 
-    state_rows = db.query(StateCharacteristic).filter(StateCharacteristic.diagnosis_id == diagnosis_id).all()
+    state_rows = (
+        db.query(StateCharacteristic)
+        .filter(StateCharacteristic.diagnosis_id == diagnosis_id)
+        .all()
+    )
     state_ids = [x.id for x in state_rows]
 
     if state_ids:
-        db.query(DiagnosisValue).filter(DiagnosisValue.state_characteristic_id.in_(state_ids)).delete(synchronize_session=False)
+        db.query(DiagnosisValue).filter(
+            DiagnosisValue.state_characteristic_id.in_(state_ids)
+        ).delete(synchronize_session=False)
 
-    db.query(StateCharacteristic).filter(StateCharacteristic.diagnosis_id == diagnosis_id).delete(synchronize_session=False)
+    db.query(StateCharacteristic).filter(
+        StateCharacteristic.diagnosis_id == diagnosis_id
+    ).delete(synchronize_session=False)
+
     db.delete(diagnosis)
     db.commit()
 
@@ -538,6 +670,7 @@ def delete_diagnosis(diagnosis_id: int, db: Session = Depends(get_db)):
 @router.get("/indicators")
 def get_indicators(db: Session = Depends(get_db)):
     rows = db.query(Indicator).order_by(Indicator.id).all()
+
     return [
         {
             "id": x.id,
@@ -561,10 +694,7 @@ def create_indicator(payload: IndicatorPayload, db: Session = Depends(get_db)):
 
     exists = db.query(Indicator).filter(Indicator.name == name).first()
     if exists:
-        raise HTTPException(
-            status_code=400,
-            detail="Такой показатель уже существует",
-        )
+        raise HTTPException(status_code=400, detail="Такой показатель уже существует")
 
     item = Indicator(name=name, value_type=value_type)
     db.add(item)
@@ -581,19 +711,34 @@ def create_indicator(payload: IndicatorPayload, db: Session = Depends(get_db)):
 @router.delete("/indicators/{indicator_id}")
 def delete_indicator(indicator_id: int, db: Session = Depends(get_db)):
     indicator = db.query(Indicator).filter(Indicator.id == indicator_id).first()
+
     if not indicator:
         raise HTTPException(status_code=404, detail="Показатель не найден")
 
-    state_rows = db.query(StateCharacteristic).filter(StateCharacteristic.indicator_id == indicator_id).all()
+    state_rows = (
+        db.query(StateCharacteristic)
+        .filter(StateCharacteristic.indicator_id == indicator_id)
+        .all()
+    )
     state_ids = [x.id for x in state_rows]
 
     if state_ids:
-        db.query(DiagnosisValue).filter(DiagnosisValue.state_characteristic_id.in_(state_ids)).delete(synchronize_session=False)
+        db.query(DiagnosisValue).filter(
+            DiagnosisValue.state_characteristic_id.in_(state_ids)
+        ).delete(synchronize_session=False)
 
-    db.query(PossibleValue).filter(PossibleValue.indicator_id == indicator_id).delete(synchronize_session=False)
-    db.query(NormalValue).filter(NormalValue.indicator_id == indicator_id).delete(synchronize_session=False)
-    db.query(SeverityValue).filter(SeverityValue.indicator_id == indicator_id).delete(synchronize_session=False)
-    db.query(StateCharacteristic).filter(StateCharacteristic.indicator_id == indicator_id).delete(synchronize_session=False)
+    db.query(PossibleValue).filter(PossibleValue.indicator_id == indicator_id).delete(
+        synchronize_session=False
+    )
+    db.query(NormalValue).filter(NormalValue.indicator_id == indicator_id).delete(
+        synchronize_session=False
+    )
+    db.query(SeverityValue).filter(SeverityValue.indicator_id == indicator_id).delete(
+        synchronize_session=False
+    )
+    db.query(StateCharacteristic).filter(
+        StateCharacteristic.indicator_id == indicator_id
+    ).delete(synchronize_session=False)
 
     db.delete(indicator)
     db.commit()
@@ -608,34 +753,109 @@ def delete_indicator(indicator_id: int, db: Session = Depends(get_db)):
 @router.get("/severity-names")
 def get_severity_names(db: Session = Depends(get_db)):
     rows = db.query(SeverityName).order_by(SeverityName.order_number).all()
-    return [{"id": x.id, "name": x.name, "order_number": x.order_number} for x in rows]
+
+    return [
+        {
+            "id": x.id,
+            "name": x.name,
+            "order_number": x.order_number,
+        }
+        for x in rows
+    ]
 
 
 @router.post("/severity-names")
 def create_severity_name(payload: NamePayload, db: Session = Depends(get_db)):
     name = normalize_name(payload.name)
+
     if not name:
-        raise HTTPException(status_code=400, detail="Название степени тяжести не может быть пустым")
+        raise HTTPException(
+            status_code=400,
+            detail="Название степени тяжести не может быть пустым",
+        )
 
     exists = db.query(SeverityName).filter(SeverityName.name == name).first()
     if exists:
-        raise HTTPException(status_code=400, detail="Такая степень тяжести уже существует")
+        raise HTTPException(
+            status_code=400,
+            detail="Такая степень тяжести уже существует",
+        )
 
-    max_order = db.query(SeverityName).count() + 1
-    item = SeverityName(name=name, order_number=max_order)
+    max_order = db.query(func.max(SeverityName.order_number)).scalar() or 0
+
+    item = SeverityName(name=name, order_number=max_order + 1)
     db.add(item)
     db.commit()
     db.refresh(item)
-    return {"id": item.id, "name": item.name, "order_number": item.order_number}
+
+    return {
+        "id": item.id,
+        "name": item.name,
+        "order_number": item.order_number,
+    }
+
+
+@router.post("/severity-names/{severity_id}/move")
+def move_severity_name(
+    severity_id: int,
+    payload: MoveSeverityPayload,
+    db: Session = Depends(get_db),
+):
+    severity = db.query(SeverityName).filter(SeverityName.id == severity_id).first()
+
+    if not severity:
+        raise HTTPException(status_code=404, detail="Степень тяжести не найдена")
+
+    rows = db.query(SeverityName).order_by(SeverityName.order_number).all()
+    index = next((i for i, item in enumerate(rows) if item.id == severity_id), None)
+
+    if index is None:
+        raise HTTPException(status_code=404, detail="Степень тяжести не найдена")
+
+    direction = payload.direction.strip().lower()
+    if direction not in {"up", "down"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Направление должно быть up или down",
+        )
+
+    if direction == "up":
+        if index == 0:
+            return {"message": "Степень тяжести уже имеет наивысший приоритет"}
+        target = rows[index - 1]
+    else:
+        if index == len(rows) - 1:
+            return {"message": "Степень тяжести уже имеет наименьший приоритет"}
+        target = rows[index + 1]
+
+    current_order = severity.order_number
+    target_order = target.order_number
+
+    temp_order = max(item.order_number for item in rows) + 1000
+
+    severity.order_number = temp_order
+    db.flush()
+
+    target.order_number = current_order
+    db.flush()
+
+    severity.order_number = target_order
+    db.commit()
+
+    return {"message": "Приоритет степени тяжести обновлён"}
 
 
 @router.delete("/severity-names/{severity_id}")
 def delete_severity_name(severity_id: int, db: Session = Depends(get_db)):
     severity = db.query(SeverityName).filter(SeverityName.id == severity_id).first()
+
     if not severity:
         raise HTTPException(status_code=404, detail="Степень тяжести не найдена")
 
-    db.query(SeverityValue).filter(SeverityValue.severity_name_id == severity_id).delete(synchronize_session=False)
+    db.query(SeverityValue).filter(
+        SeverityValue.severity_name_id == severity_id
+    ).delete(synchronize_session=False)
+
     db.delete(severity)
     db.commit()
 
@@ -648,52 +868,93 @@ def delete_severity_name(severity_id: int, db: Session = Depends(get_db)):
 
 @router.get("/possible-values")
 def get_possible_values(
-    indicator_id: int = Query(...),
+    indicator_id: int | None = Query(None),
     db: Session = Depends(get_db),
 ):
-    rows = (
-        db.query(PossibleValue)
-        .filter(PossibleValue.indicator_id == indicator_id)
-        .order_by(PossibleValue.id)
-        .all()
+    query = (
+        db.query(PossibleValue, Indicator)
+        .join(Indicator, Indicator.id == PossibleValue.indicator_id)
     )
+
+    if indicator_id is not None:
+        query = query.filter(PossibleValue.indicator_id == indicator_id)
+
+    rows = query.order_by(Indicator.id, PossibleValue.id).all()
 
     return [
         {
-            "id": x.id,
-            "indicator_id": x.indicator_id,
-            "value_text": format_value(
-                x.value_kind, x.min_value, x.max_value,
-                x.min_inclusive, x.max_inclusive, x.scalar_value
-            ),
+            "id": value.id,
+            "indicator_id": value.indicator_id,
+            "indicator_name": indicator.name,
+            "indicator_value_type": indicator.value_type,
+            "value_text": format_row_value(value),
         }
-        for x in rows
+        for value, indicator in rows
     ]
 
 
 @router.post("/possible-values")
 def create_possible_value(payload: ValueTextPayload, db: Session = Depends(get_db)):
     indicator = db.query(Indicator).filter(Indicator.id == payload.indicator_id).first()
+
     if not indicator:
         raise HTTPException(status_code=404, detail="Показатель не найден")
 
     parsed = parse_value_text(payload.value_text)
     validate_parsed_value_for_indicator(indicator, parsed)
 
+    existing_values = get_possible_values_for_indicator(db, indicator.id)
+
+    if indicator.value_type == "numeric" and existing_values:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Для числового показателя «{indicator.name}» уже задано "
+                "возможное значение. Удалите старое значение перед добавлением нового."
+            ),
+        )
+
+    if indicator.value_type == "categorical":
+        duplicate = any(
+            row.value_kind == "scalar"
+            and row.scalar_value.strip() == parsed["scalar_value"].strip()
+            for row in existing_values
+        )
+
+        if duplicate:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Такое возможное значение для показателя «{indicator.name}» уже существует",
+            )
+
     item = PossibleValue(
         indicator_id=payload.indicator_id,
         **parsed,
     )
 
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+
+    return {
+        "id": item.id,
+        "indicator_id": item.indicator_id,
+        "indicator_name": indicator.name,
+        "indicator_value_type": indicator.value_type,
+        "value_text": format_row_value(item),
+    }
+
 
 @router.delete("/possible-values/{value_id}")
 def delete_possible_value(value_id: int, db: Session = Depends(get_db)):
     row = db.query(PossibleValue).filter(PossibleValue.id == value_id).first()
+
     if not row:
         raise HTTPException(status_code=404, detail="Возможное значение не найдено")
 
     db.delete(row)
     db.commit()
+
     return {"message": "Возможное значение удалено"}
 
 
@@ -703,32 +964,61 @@ def delete_possible_value(value_id: int, db: Session = Depends(get_db)):
 
 @router.get("/normal-values")
 def get_normal_values(
-    indicator_id: int = Query(...),
+    indicator_id: int | None = Query(None),
     db: Session = Depends(get_db),
 ):
-    rows = (
-        db.query(NormalValue)
-        .filter(NormalValue.indicator_id == indicator_id)
-        .order_by(NormalValue.id)
-        .all()
-    )
+    # Обратная совместимость со старым экраном:
+    # GET /knowledge/normal-values?indicator_id=...
+    if indicator_id is not None:
+        rows = (
+            db.query(NormalValue)
+            .filter(NormalValue.indicator_id == indicator_id)
+            .order_by(NormalValue.id)
+            .all()
+        )
 
-    return [
-        {
-            "id": x.id,
-            "indicator_id": x.indicator_id,
-            "value_text": format_value(
-                x.value_kind, x.min_value, x.max_value,
-                x.min_inclusive, x.max_inclusive, x.scalar_value
-            ),
-        }
-        for x in rows
-    ]
+        return [
+            {
+                "id": x.id,
+                "indicator_id": x.indicator_id,
+                "value_text": format_row_value(x),
+            }
+            for x in rows
+        ]
+
+    # Новый экран:
+    # GET /knowledge/normal-values
+    indicators = db.query(Indicator).order_by(Indicator.id).all()
+    rows = []
+
+    for indicator in indicators:
+        value = (
+            db.query(NormalValue)
+            .filter(NormalValue.indicator_id == indicator.id)
+            .order_by(NormalValue.id)
+            .first()
+        )
+
+        possible_values = get_possible_value_texts_for_indicator(db, indicator.id)
+
+        rows.append(
+            {
+                "indicator_id": indicator.id,
+                "indicator_name": indicator.name,
+                "indicator_value_type": indicator.value_type,
+                "possible_values": possible_values,
+                "possible_value_text": ", ".join(possible_values),
+                "value_text": format_row_value(value) if value else "",
+            }
+        )
+
+    return {"rows": rows}
 
 
 @router.post("/normal-values")
 def create_normal_value(payload: ValueTextPayload, db: Session = Depends(get_db)):
     indicator = db.query(Indicator).filter(Indicator.id == payload.indicator_id).first()
+
     if not indicator:
         raise HTTPException(status_code=404, detail="Показатель не найден")
 
@@ -737,6 +1027,7 @@ def create_normal_value(payload: ValueTextPayload, db: Session = Depends(get_db)
         .filter(NormalValue.indicator_id == payload.indicator_id)
         .first()
     )
+
     if existing:
         raise HTTPException(
             status_code=400,
@@ -745,11 +1036,13 @@ def create_normal_value(payload: ValueTextPayload, db: Session = Depends(get_db)
 
     parsed = parse_value_text(payload.value_text)
     validate_parsed_value_for_indicator(indicator, parsed)
+    validate_value_inside_possible_values(db, indicator, parsed)
 
     item = NormalValue(
         indicator_id=payload.indicator_id,
         **parsed,
     )
+
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -757,25 +1050,54 @@ def create_normal_value(payload: ValueTextPayload, db: Session = Depends(get_db)
     return {
         "id": item.id,
         "indicator_id": item.indicator_id,
-        "value_text": format_value(
-            item.value_kind,
-            item.min_value,
-            item.max_value,
-            item.min_inclusive,
-            item.max_inclusive,
-            item.scalar_value,
-        ),
+        "value_text": format_row_value(item),
     }
+
+
+@router.put("/normal-values")
+def replace_normal_values(payload: NormalValuesPayload, db: Session = Depends(get_db)):
+    db.query(NormalValue).delete(synchronize_session=False)
+
+    for row in payload.rows:
+        value_text = row.value_text.strip()
+
+        if not value_text:
+            continue
+
+        indicator = db.query(Indicator).filter(Indicator.id == row.indicator_id).first()
+
+        if not indicator:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Показатель с id={row.indicator_id} не найден",
+            )
+
+        parsed = parse_value_text(value_text)
+        validate_parsed_value_for_indicator(indicator, parsed)
+        validate_value_inside_possible_values(db, indicator, parsed)
+
+        db.add(
+            NormalValue(
+                indicator_id=row.indicator_id,
+                **parsed,
+            )
+        )
+
+    db.commit()
+
+    return {"message": "Нормальные значения обновлены"}
 
 
 @router.delete("/normal-values/{value_id}")
 def delete_normal_value(value_id: int, db: Session = Depends(get_db)):
     row = db.query(NormalValue).filter(NormalValue.id == value_id).first()
+
     if not row:
         raise HTTPException(status_code=404, detail="Нормальное значение не найдено")
 
     db.delete(row)
     db.commit()
+
     return {"message": "Нормальное значение удалено"}
 
 
@@ -801,20 +1123,26 @@ def get_state_characteristics(
 
 
 @router.put("/state-characteristics")
-def replace_state_characteristics(payload: StateCharacteristicPayload, db: Session = Depends(get_db)):
+def replace_state_characteristics(
+    payload: StateCharacteristicPayload,
+    db: Session = Depends(get_db),
+):
     diagnosis = db.query(Diagnosis).filter(Diagnosis.id == payload.diagnosis_id).first()
+
     if not diagnosis:
         raise HTTPException(status_code=404, detail="Диагноз не найден")
 
-    current_rows = db.query(StateCharacteristic).filter(
-        StateCharacteristic.diagnosis_id == payload.diagnosis_id
-    ).all()
+    current_rows = (
+        db.query(StateCharacteristic)
+        .filter(StateCharacteristic.diagnosis_id == payload.diagnosis_id)
+        .all()
+    )
     current_ids = [x.id for x in current_rows]
 
     if current_ids:
-        db.query(DiagnosisValue).filter(DiagnosisValue.state_characteristic_id.in_(current_ids)).delete(
-            synchronize_session=False
-        )
+        db.query(DiagnosisValue).filter(
+            DiagnosisValue.state_characteristic_id.in_(current_ids)
+        ).delete(synchronize_session=False)
 
     db.query(StateCharacteristic).filter(
         StateCharacteristic.diagnosis_id == payload.diagnosis_id
@@ -822,6 +1150,7 @@ def replace_state_characteristics(payload: StateCharacteristicPayload, db: Sessi
 
     for indicator_id in payload.indicator_ids:
         indicator = db.query(Indicator).filter(Indicator.id == indicator_id).first()
+
         if indicator:
             db.add(
                 StateCharacteristic(
@@ -831,6 +1160,7 @@ def replace_state_characteristics(payload: StateCharacteristicPayload, db: Sessi
             )
 
     db.commit()
+
     return {"message": "Характеристики состояния обновлены"}
 
 
@@ -847,13 +1177,14 @@ def get_severity_values(
     rows = []
 
     for indicator in indicators:
-        value = (
+        values = (
             db.query(SeverityValue)
             .filter(
                 SeverityValue.severity_name_id == severity_id,
                 SeverityValue.indicator_id == indicator.id,
             )
-            .first()
+            .order_by(SeverityValue.id)
+            .all()
         )
 
         rows.append(
@@ -861,14 +1192,8 @@ def get_severity_values(
                 "indicator_id": indicator.id,
                 "indicator_name": indicator.name,
                 "indicator_value_type": indicator.value_type,
-                "value_text": format_value(
-                    value.value_kind,
-                    value.min_value,
-                    value.max_value,
-                    value.min_inclusive,
-                    value.max_inclusive,
-                    value.scalar_value,
-                ) if value else "",
+                "possible_values": get_possible_value_texts_for_indicator(db, indicator.id),
+                "value_text": " ∪ ".join(format_row_value(value) for value in values),
             }
         )
 
@@ -877,7 +1202,12 @@ def get_severity_values(
 
 @router.put("/severity-values")
 def replace_severity_values(payload: SeverityValuesPayload, db: Session = Depends(get_db)):
-    severity = db.query(SeverityName).filter(SeverityName.id == payload.severity_id).first()
+    severity = (
+        db.query(SeverityName)
+        .filter(SeverityName.id == payload.severity_id)
+        .first()
+    )
+
     if not severity:
         raise HTTPException(status_code=404, detail="Степень тяжести не найдена")
 
@@ -887,25 +1217,36 @@ def replace_severity_values(payload: SeverityValuesPayload, db: Session = Depend
 
     for row in payload.rows:
         value_text = row.value_text.strip()
+
         if not value_text:
             continue
 
         indicator = db.query(Indicator).filter(Indicator.id == row.indicator_id).first()
+
         if not indicator:
-            continue
-
-        parsed = parse_value_text(value_text)
-        validate_parsed_value_for_indicator(indicator, parsed)
-
-        db.add(
-            SeverityValue(
-                indicator_id=row.indicator_id,
-                severity_name_id=payload.severity_id,
-                **parsed,
+            raise HTTPException(
+                status_code=404,
+                detail=f"Показатель с id={row.indicator_id} не найден",
             )
-        )
+
+        # Поддерживаем ввод вида "[0;10) ∪ (500;1000]"
+        parts = [part.strip() for part in value_text.split("∪") if part.strip()]
+
+        for part in parts:
+            parsed = parse_value_text(part)
+            validate_parsed_value_for_indicator(indicator, parsed)
+            validate_value_inside_possible_values(db, indicator, parsed)
+
+            db.add(
+                SeverityValue(
+                    indicator_id=row.indicator_id,
+                    severity_name_id=payload.severity_id,
+                    **parsed,
+                )
+            )
 
     db.commit()
+
     return {"message": "Значения показателей степени тяжести обновлены"}
 
 
@@ -933,29 +1274,20 @@ def get_diagnosis_values(
 
     rows = []
     for indicator in indicators:
-        value_text = ""
-
-        value = (
+        values = (
             db.query(DiagnosisValue)
             .filter(DiagnosisValue.state_characteristic_id == state_map[indicator.id])
-            .first()
+            .order_by(DiagnosisValue.id)
+            .all()
         )
-        if value:
-            value_text = format_value(
-                value.value_kind,
-                value.min_value,
-                value.max_value,
-                value.min_inclusive,
-                value.max_inclusive,
-                value.scalar_value,
-            )
 
         rows.append(
             {
                 "indicator_id": indicator.id,
                 "indicator_name": indicator.name,
                 "indicator_value_type": indicator.value_type,
-                "value_text": value_text,
+                "possible_values": get_possible_value_texts_for_indicator(db, indicator.id),
+                "value_text": " ∪ ".join(format_row_value(value) for value in values),
             }
         )
 
@@ -965,12 +1297,14 @@ def get_diagnosis_values(
 @router.put("/diagnosis-values")
 def replace_diagnosis_values(payload: DiagnosisValuesPayload, db: Session = Depends(get_db)):
     diagnosis = db.query(Diagnosis).filter(Diagnosis.id == payload.diagnosis_id).first()
+
     if not diagnosis:
         raise HTTPException(status_code=404, detail="Диагноз не найден")
 
     state_map = get_state_characteristic_map(db, payload.diagnosis_id)
 
     used_state_ids = list(state_map.values())
+
     if used_state_ids:
         db.query(DiagnosisValue).filter(
             DiagnosisValue.state_characteristic_id.in_(used_state_ids)
@@ -978,28 +1312,42 @@ def replace_diagnosis_values(payload: DiagnosisValuesPayload, db: Session = Depe
 
     for row in payload.rows:
         value_text = row.value_text.strip()
+
         if not value_text:
             continue
 
         if row.indicator_id not in state_map:
             raise HTTPException(
                 status_code=400,
-                detail="Нельзя задать правило для показателя, который не выбран в характеристиках состояния",
+                detail=(
+                    "Нельзя задать правило для показателя, который не выбран "
+                    "в характеристиках состояния"
+                ),
             )
 
         indicator = db.query(Indicator).filter(Indicator.id == row.indicator_id).first()
+
         if not indicator:
-            continue
-
-        parsed = parse_value_text(value_text)
-        validate_parsed_value_for_indicator(indicator, parsed)
-
-        db.add(
-            DiagnosisValue(
-                state_characteristic_id=state_map[row.indicator_id],
-                **parsed,
+            raise HTTPException(
+                status_code=404,
+                detail=f"Показатель с id={row.indicator_id} не найден",
             )
-        )
+
+        # Поддерживаем ввод вида "[0;10) ∪ (500;1000]"
+        parts = [part.strip() for part in value_text.split("∪") if part.strip()]
+
+        for part in parts:
+            parsed = parse_value_text(part)
+            validate_parsed_value_for_indicator(indicator, parsed)
+            validate_value_inside_possible_values(db, indicator, parsed)
+
+            db.add(
+                DiagnosisValue(
+                    state_characteristic_id=state_map[row.indicator_id],
+                    **parsed,
+                )
+            )
 
     db.commit()
+
     return {"message": "Значения показателей диагноза обновлены"}

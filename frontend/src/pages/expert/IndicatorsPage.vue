@@ -15,7 +15,7 @@
         />
 
         <select v-model="newIndicatorType" class="select-input">
-          <option value="numeric">Числовой</option>
+          <option value="numeric">Целочисленный</option>
           <option value="categorical">Категориальный</option>
         </select>
 
@@ -115,7 +115,7 @@ const clearMessages = () => {
 };
 
 const formatType = (valueType) => {
-  if (valueType === "numeric") return "Числовой";
+  if (valueType === "numeric") return "Целочисленный";
   if (valueType === "categorical") return "Категориальный";
   return valueType;
 };

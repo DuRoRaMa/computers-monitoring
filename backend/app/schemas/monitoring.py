@@ -1,32 +1,35 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, field_validator
 
 
 class MonitoringInput(BaseModel):
-    cpu_load: float | None = Field(None, ge=0, le=100)
-    ram_usage: float | None = Field(None, ge=0, le=100)
-    cpu_temp: float | None = Field(None, ge=20, le=120)
-    disk_speed: float | None = Field(None, ge=0, le=1000)
-    disk_fill: float | None = Field(None, ge=0, le=100)
-    network_bandwidth: float | None = Field(None, ge=0, le=10000)
-    process_count: int | None = Field(None, ge=0, le=1000)
+    # Жесткие диапазоны здесь не задаются.
+    # Допустимость значений проверяется в /monitoring/evaluate
+    # по возможным значениям из базы знаний.
+    cpu_load: float | None = None
+    ram_usage: float | None = None
+    cpu_temp: float | None = None
+    disk_speed: float | None = None
+    disk_fill: float | None = None
+    network_bandwidth: float | None = None
+    process_count: float | None = None
     service_state: str | None = None
     previous_state: str | None = None
 
-    @field_validator("service_state")
+    @field_validator(
+        "cpu_load",
+        "ram_usage",
+        "cpu_temp",
+        "disk_speed",
+        "disk_fill",
+        "network_bandwidth",
+        "process_count",
+    )
     @classmethod
-    def validate_service_state(cls, value: str | None) -> str | None:
+    def validate_integer_numeric_value(cls, value: float | None) -> float | None:
         if value is None:
             return value
 
-        allowed = {
-            "Все работают",
-            "Некоторые остановлены",
-            "Критический сервис остановлен",
-        }
-        if value not in allowed:
-            raise ValueError(
-                "service_state должен быть одним из значений: "
-                "'Все работают', 'Некоторые остановлены', "
-                "'Критический сервис остановлен'"
-            )
+        if not float(value).is_integer():
+            raise ValueError("Значение числового показателя должно быть целым числом")
+
         return value

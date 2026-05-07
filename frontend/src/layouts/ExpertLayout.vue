@@ -36,17 +36,11 @@
         <RouterLink class="nav-link" to="/expert/state-characteristics">
           Характеристики состояния
         </RouterLink>
-      </div>
-
-      <div class="nav-group">
-        <div class="nav-group-title">Правила</div>
-
         <RouterLink class="nav-link" to="/expert/severity-rules">
-          Правила степеней тяжести
+          Значение показателей степеней тяжести
         </RouterLink>
-
         <RouterLink class="nav-link" to="/expert/diagnosis-rules">
-          Правила диагнозов
+          Значения показателей диагнозов
         </RouterLink>
       </div>
 

@@ -4,36 +4,53 @@
       <div class="section-header">
         <h2>Мониторинг состояния</h2>
         <p>
-          Экспертная система и модуль машинного обучения рассчитываются всегда.
+          Вводимые значения проверяются по возможным значениям из базы знаний.
           При полном наборе признаков итоговый ответ даёт экспертная система,
           при неполном — модуль машинного обучения.
         </p>
       </div>
 
+      <div v-if="constraintsError" class="warning-message">
+        {{ constraintsError }}
+      </div>
+
       <div class="form-grid">
         <label v-for="field in numericFields" :key="field.key" class="field-card">
           <span>{{ field.label }}</span>
+
           <input
             v-model="form[field.key]"
             class="number-input"
             :class="{ invalid: isFieldInvalid(field) }"
             type="number"
-            :min="field.min"
-            :max="field.max"
-            :step="field.step"
-            :placeholder="`${field.min}–${field.max} ${field.unit}`"
+            :min="fieldMin(field)"
+            :max="fieldMax(field)"
+            step="1"
+            :placeholder="fieldPlaceholder(field)"
           />
-          <small class="field-hint">Диапазон: {{ field.min }}–{{ field.max }} {{ field.unit }}</small>
+
+          <small class="field-hint">
+            Возможное значение: {{ possibleValuesText(field.label) }}
+          </small>
         </label>
 
         <label class="field-card">
           <span>Сервисы состояние</span>
+
           <select v-model="form.service_state">
             <option value="">Не указано</option>
-            <option>Все работают</option>
-            <option>Некоторые остановлены</option>
-            <option>Критический сервис остановлен</option>
+            <option
+              v-for="value in serviceStateOptions"
+              :key="value"
+              :value="value"
+            >
+              {{ value }}
+            </option>
           </select>
+
+          <small class="field-hint">
+            Возможные значения: {{ possibleValuesText("Сервисы состояние") }}
+          </small>
         </label>
 
         <div class="field-card readonly-card">
@@ -56,7 +73,11 @@
       </div>
 
       <div class="actions-row">
-        <button class="primary-btn" @click="runMonitoringAndSave" :disabled="loading">
+        <button
+          class="primary-btn"
+          @click="runMonitoringAndSave"
+          :disabled="loading || constraintsLoading"
+        >
           {{ loading ? "Выполняется..." : "Проанализировать и сохранить" }}
         </button>
       </div>
@@ -66,7 +87,6 @@
       <div v-if="error" class="error-message">{{ error }}</div>
     </section>
 
-    <!-- Итог -->
     <section v-if="result" class="details-card">
       <div class="section-header">
         <h3>Итоговый ответ системы</h3>
@@ -94,22 +114,25 @@
       <p class="explanation-text">{{ result.explanation }}</p>
     </section>
 
-    <!-- Пропущенные признаки -->
     <section
       v-if="result?.missing_indicators && result.missing_indicators.length"
       class="details-card"
     >
       <div class="section-header">
-        <h3>Незаполненные показатели</h3>
+        <h3>Пропущенные показатели</h3>
       </div>
 
-      <p class="explanation-text">
-        Пользователь не ввёл следующие показатели:
-        {{ result.missing_indicators.join(", ") }}.
-      </p>
+      <div class="tag-list">
+        <span
+          v-for="item in result.missing_indicators"
+          :key="item"
+          class="tag"
+        >
+          {{ item }}
+        </span>
+      </div>
     </section>
 
-    <!-- Результат ЭС -->
     <section v-if="result?.expert_result" class="details-card">
       <div class="section-header">
         <h3>Результат экспертной системы</h3>
@@ -137,7 +160,6 @@
       <p class="explanation-text">{{ result.expert_result.explanation }}</p>
     </section>
 
-    <!-- Детализация ЭС -->
     <section
       v-if="result?.indicator_results && result.indicator_results.length"
       class="details-card"
@@ -166,7 +188,6 @@
       </div>
     </section>
 
-    <!-- Результат МО -->
     <section v-if="result?.ml_result" class="details-card">
       <div class="section-header">
         <h3>Результат модуля машинного обучения</h3>
@@ -214,26 +235,37 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
+
+import { getAllPossibleValues } from "../../api/knowledge";
 import { evaluateMonitoring } from "../../api/monitoring";
 import { createObservation, getObservations } from "../../api/observations";
 
 const loading = ref(false);
 const historyLoading = ref(false);
+const constraintsLoading = ref(false);
 const error = ref("");
 const warning = ref("");
 const success = ref("");
+const constraintsError = ref("");
 const result = ref(null);
 const lastFinalState = ref(null);
+const possibleValuesByIndicatorName = ref({});
 
 const numericFields = [
-  { key: "cpu_load", label: "CPU загрузка", min: 0, max: 100, step: 1, unit: "%" },
-  { key: "ram_usage", label: "RAM занятость", min: 0, max: 100, step: 1, unit: "%" },
-  { key: "cpu_temp", label: "CPU температура", min: 20, max: 120, step: 1, unit: "°C" },
-  { key: "disk_speed", label: "Диск скорость", min: 0, max: 1000, step: 1, unit: "МБ/с" },
-  { key: "disk_fill", label: "Диск заполнение", min: 0, max: 100, step: 1, unit: "%" },
-  { key: "network_bandwidth", label: "Сеть пропускная", min: 0, max: 10000, step: 10, unit: "Мбит/с" },
-  { key: "process_count", label: "Процессы количество", min: 0, max: 1000, step: 1, unit: "" },
+  { key: "cpu_load", label: "CPU загрузка", min: 0, max: 100, unit: "%" },
+  { key: "ram_usage", label: "RAM занятость", min: 0, max: 100, unit: "%" },
+  { key: "cpu_temp", label: "CPU температура", min: 20, max: 120, unit: "°C" },
+  { key: "disk_speed", label: "Диск скорость", min: 0, max: 1000, unit: "МБ/с" },
+  { key: "disk_fill", label: "Диск заполнение", min: 0, max: 100, unit: "%" },
+  { key: "network_bandwidth", label: "Сеть пропускная", min: 0, max: 10000, unit: "Мбит/с" },
+  { key: "process_count", label: "Процессы количество", min: 0, max: 1000, unit: "" },
+];
+
+const defaultServiceStateOptions = [
+  "Все работают",
+  "Некоторые остановлены",
+  "Критический сервис остановлен",
 ];
 
 const form = reactive({
@@ -249,8 +281,50 @@ const form = reactive({
 
 const isEmpty = (value) => value === "" || value === null || value === undefined;
 
+const serviceStateOptions = computed(() => {
+  const values = possibleValuesByIndicatorName.value["Сервисы состояние"] || [];
+  return values.length ? values : defaultServiceStateOptions;
+});
+
+const loadKnowledgeConstraints = async () => {
+  constraintsLoading.value = true;
+  constraintsError.value = "";
+
+  try {
+    const rows = await getAllPossibleValues();
+
+    const grouped = {};
+
+    for (const row of rows) {
+      const indicatorName = row.indicator_name;
+      const valueText = row.value_text;
+
+      if (!indicatorName || !valueText) {
+        continue;
+      }
+
+      if (!grouped[indicatorName]) {
+        grouped[indicatorName] = [];
+      }
+
+      grouped[indicatorName].push(valueText);
+    }
+
+    possibleValuesByIndicatorName.value = grouped;
+  } catch (err) {
+    console.error(err);
+    constraintsError.value =
+      err?.response?.data?.detail ||
+      "Не удалось загрузить возможные значения из базы знаний.";
+    possibleValuesByIndicatorName.value = {};
+  } finally {
+    constraintsLoading.value = false;
+  }
+};
+
 const loadLastObservationState = async () => {
   historyLoading.value = true;
+
   try {
     const rows = await getObservations();
     lastFinalState.value = rows?.length ? rows[0].final_state : null;
@@ -262,24 +336,145 @@ const loadLastObservationState = async () => {
   }
 };
 
+const parseRange = (valueText) => {
+  const text = String(valueText || "").trim();
+
+  if (
+    text.length < 5 ||
+    !["[", "("].includes(text[0]) ||
+    !["]", ")"].includes(text[text.length - 1]) ||
+    !text.includes(";")
+  ) {
+    return null;
+  }
+
+  const [left, right] = text.slice(1, -1).split(";");
+
+  const min = Number(String(left).replace(",", ".").trim());
+  const max = Number(String(right).replace(",", ".").trim());
+
+  if (Number.isNaN(min) || Number.isNaN(max)) {
+    return null;
+  }
+
+  return {
+    min,
+    max,
+    minInclusive: text[0] === "[",
+    maxInclusive: text[text.length - 1] === "]",
+  };
+};
+
+const numberInRange = (value, range) => {
+  const leftOk = range.minInclusive ? value >= range.min : value > range.min;
+  const rightOk = range.maxInclusive ? value <= range.max : value < range.max;
+  return leftOk && rightOk;
+};
+
+const possibleValues = (indicatorName) =>
+  possibleValuesByIndicatorName.value[indicatorName] || [];
+
+const possibleValuesText = (indicatorName) => {
+  const values = possibleValues(indicatorName);
+  return values.length ? values.join(", ") : "не заданы";
+};
+
+const possibleRanges = (indicatorName) =>
+  possibleValues(indicatorName)
+    .map(parseRange)
+    .filter(Boolean);
+
+const fieldMin = (field) => {
+  const ranges = possibleRanges(field.label);
+
+  if (!ranges.length) {
+    return field.min;
+  }
+
+  return Math.min(...ranges.map((range) => range.min));
+};
+
+const fieldMax = (field) => {
+  const ranges = possibleRanges(field.label);
+
+  if (!ranges.length) {
+    return field.max;
+  }
+
+  return Math.max(...ranges.map((range) => range.max));
+};
+
+const fieldPlaceholder = (field) => {
+  const text = possibleValuesText(field.label);
+
+  if (text === "не заданы") {
+    return `${field.min}–${field.max} ${field.unit}`.trim();
+  }
+
+  return `${text} ${field.unit}`.trim();
+};
+
 const isFieldInvalid = (field) => {
-  if (isEmpty(form[field.key])) return false;
+  if (isEmpty(form[field.key])) {
+    return false;
+  }
 
   const value = Number(form[field.key]);
-  return Number.isNaN(value) || value < field.min || value > field.max;
+
+  if (Number.isNaN(value) || !Number.isInteger(value)) {
+    return true;
+  }
+
+  const ranges = possibleRanges(field.label);
+
+  if (!ranges.length) {
+    return true;
+  }
+
+  return !ranges.some((range) => numberInRange(value, range));
 };
 
 const validateForm = () => {
-  const invalidField = numericFields.find((field) => isFieldInvalid(field));
-  if (invalidField) {
-    return `Показатель «${invalidField.label}» должен быть в диапазоне от ${invalidField.min} до ${invalidField.max}.`;
-  }
-
   const hasAtLeastOneValue =
-    numericFields.some((field) => !isEmpty(form[field.key])) || !isEmpty(form.service_state);
+    numericFields.some((field) => !isEmpty(form[field.key])) ||
+    !isEmpty(form.service_state);
 
   if (!hasAtLeastOneValue) {
     return "Введите хотя бы один показатель для анализа.";
+  }
+
+  for (const field of numericFields) {
+    if (isEmpty(form[field.key])) {
+      continue;
+    }
+
+    const value = Number(form[field.key]);
+
+    if (Number.isNaN(value) || !Number.isInteger(value)) {
+      return `Показатель «${field.label}» должен быть целым числом.`;
+    }
+
+    const ranges = possibleRanges(field.label);
+
+    if (!ranges.length) {
+      return `Для показателя «${field.label}» сначала задайте возможное значение.`;
+    }
+
+    if (!ranges.some((range) => numberInRange(value, range))) {
+      return `Показатель «${field.label}» должен входить в возможное значение: ${possibleValuesText(field.label)}.`;
+    }
+  }
+
+  if (!isEmpty(form.service_state)) {
+    const allowedServices = possibleValues("Сервисы состояние");
+
+    if (!allowedServices.length) {
+      return "Для показателя «Сервисы состояние» сначала задайте возможное значение.";
+    }
+
+    if (!allowedServices.includes(form.service_state)) {
+      return `Показатель «Сервисы состояние» должен входить в возможное значение: ${allowedServices.join(", ")}.`;
+    }
   }
 
   return null;
@@ -292,10 +487,7 @@ const buildPayload = () => {
 
   for (const field of numericFields) {
     if (!isEmpty(form[field.key])) {
-      payload[field.key] =
-        field.key === "process_count"
-          ? Math.round(Number(form[field.key]))
-          : Number(form[field.key]);
+      payload[field.key] = Number(form[field.key]);
     }
   }
 
@@ -315,6 +507,7 @@ const runMonitoringAndSave = async () => {
 
   try {
     const validationError = validateForm();
+
     if (validationError) {
       error.value = validationError;
       return;
@@ -359,7 +552,10 @@ const runMonitoringAndSave = async () => {
 };
 
 onMounted(async () => {
-  await loadLastObservationState();
+  await Promise.all([
+    loadKnowledgeConstraints(),
+    loadLastObservationState(),
+  ]);
 });
 </script>
 
@@ -388,6 +584,7 @@ onMounted(async () => {
 .section-header p {
   margin: 8px 0 0 0;
   color: #64748b;
+  line-height: 1.5;
 }
 
 .form-grid {
@@ -398,30 +595,27 @@ onMounted(async () => {
 }
 
 .field-card {
-  border: 1px solid #e2e8f0;
-  border-radius: 18px;
-  padding: 16px;
-  background: #f8fafc;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 18px;
+  background: #f8fafc;
 }
 
 .field-card span {
-  font-size: 14px;
   font-weight: 700;
-  color: #334155;
+  color: #0f172a;
 }
 
 .number-input,
-.field-card select,
-.readonly-value {
-  width: 100%;
-  min-height: 46px;
+select {
+  min-height: 42px;
   border: 1px solid #cbd5e1;
-  border-radius: 14px;
-  padding: 0 14px;
-  font-size: 15px;
+  border-radius: 12px;
+  padding: 0 12px;
+  font-size: 14px;
   background: white;
 }
 
@@ -430,95 +624,122 @@ onMounted(async () => {
   background: #fef2f2;
 }
 
-.readonly-value {
-  display: flex;
-  align-items: center;
-  color: #0f172a;
-  font-weight: 700;
+.field-hint {
+  color: #64748b;
+  line-height: 1.4;
 }
 
-.field-hint {
-  font-size: 13px;
-  color: #64748b;
+.readonly-card {
+  background: #f1f5f9;
+}
+
+.readonly-value {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  color: #334155;
 }
 
 .actions-row {
-  margin-top: 22px;
   display: flex;
   justify-content: flex-end;
+  margin-top: 18px;
 }
 
 .primary-btn {
-  border: none;
+  border: 0;
   border-radius: 14px;
-  min-height: 48px;
-  padding: 0 20px;
-  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  padding: 12px 18px;
+  background: #0f172a;
   color: white;
-  font-weight: 800;
+  font-weight: 700;
   cursor: pointer;
 }
 
 .primary-btn:disabled {
-  opacity: 0.7;
+  opacity: 0.6;
   cursor: not-allowed;
 }
 
-.success-message {
+.success-message,
+.warning-message,
+.error-message {
   margin-top: 14px;
-  color: #0f766e;
-  font-weight: 700;
+  padding: 12px 14px;
+  border-radius: 14px;
+}
+
+.success-message {
+  background: #ecfdf5;
+  color: #047857;
 }
 
 .warning-message {
-  margin-top: 14px;
-  color: #b45309;
-  font-weight: 700;
+  background: #fffbeb;
+  color: #92400e;
 }
 
 .error-message {
-  margin-top: 14px;
-  color: #dc2626;
-  font-weight: 700;
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 .result-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 20px;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 14px;
+  margin-top: 16px;
 }
 
 .inner-grid {
-  margin-top: 18px;
+  grid-template-columns: repeat(3, minmax(140px, 1fr));
 }
 
 .result-card {
-  background: white;
-  border-radius: 22px;
-  padding: 22px;
-  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.06);
+  background: #f8fafc;
   border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 14px;
 }
 
 .result-card.small {
-  padding: 18px;
+  padding: 12px;
 }
 
 .result-label {
   color: #64748b;
-  font-size: 14px;
-  margin-bottom: 10px;
+  font-size: 13px;
+  margin-bottom: 6px;
 }
 
 .result-value {
   color: #0f172a;
-  font-size: 22px;
   font-weight: 800;
 }
 
+.explanation-text {
+  color: #334155;
+  line-height: 1.6;
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.tag {
+  background: #e0f2fe;
+  color: #075985;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-weight: 700;
+}
+
 .table-wrap {
-  overflow: auto;
-  margin-top: 18px;
+  overflow-x: auto;
+  margin-top: 14px;
 }
 
 .data-table {
@@ -528,49 +749,38 @@ onMounted(async () => {
 
 .data-table th,
 .data-table td {
-  padding: 14px 12px;
   border-bottom: 1px solid #e2e8f0;
+  padding: 12px;
   text-align: left;
 }
 
 .data-table th {
   color: #475569;
-  font-size: 14px;
-}
-
-.explanation-text {
-  margin: 18px 0 0 0;
-  line-height: 1.7;
-  color: #334155;
+  background: #f8fafc;
 }
 
 .probability-list {
-  display: grid;
-  gap: 14px;
-  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .probability-card {
-  border: 1px solid #e2e8f0;
-  border-radius: 16px;
-  padding: 16px;
-  background: #f8fafc;
+  display: grid;
+  grid-template-columns: 1fr 60px 2fr;
+  gap: 12px;
+  align-items: center;
 }
 
 .probability-name {
   font-weight: 700;
-  color: #0f172a;
-  margin-bottom: 8px;
 }
 
 .probability-value {
-  color: #059669;
-  font-weight: 800;
-  margin-bottom: 8px;
+  color: #475569;
 }
 
 .probability-bar {
-  width: 100%;
   height: 10px;
   background: #e2e8f0;
   border-radius: 999px;
@@ -579,24 +789,19 @@ onMounted(async () => {
 
 .probability-fill {
   height: 100%;
-  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  background: #0f172a;
 }
 
-@media (max-width: 980px) {
-  .form-grid {
+@media (max-width: 900px) {
+  .form-grid,
+  .result-grid,
+  .inner-grid {
     grid-template-columns: 1fr;
   }
 
-  .result-grid {
+  .probability-card {
     grid-template-columns: 1fr;
-  }
-
-  .actions-row {
-    justify-content: stretch;
-  }
-
-  .primary-btn {
-    width: 100%;
   }
 }
 </style>
+

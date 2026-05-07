@@ -103,6 +103,15 @@ export const deleteNormalValue = async (id) => {
   const response = await http.delete(`/knowledge/normal-values/${id}`);
   return response.data;
 };
+export const getAllNormalValues = async () => {
+  const response = await http.get("/knowledge/normal-values");
+  return response.data;
+};
+
+export const saveNormalValues = async (rows) => {
+  const response = await http.put("/knowledge/normal-values", { rows });
+  return response.data;
+};
 
 /* ------------------ State characteristics ------------------ */
 export const getStateCharacteristics = async (diagnosisId) => {
@@ -156,5 +165,10 @@ export const moveSeverityName = async (id, direction) => {
   const response = await http.post(`/knowledge/severity-names/${id}/move`, {
     direction,
   });
+  return response.data;
+};
+
+export const getAllPossibleValues = async () => {
+  const response = await http.get("/knowledge/possible-values");
   return response.data;
 };

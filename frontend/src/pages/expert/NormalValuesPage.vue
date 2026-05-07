@@ -2,219 +2,187 @@
   <div class="page-grid">
     <section class="card">
       <div class="card-header">
-        <h2>Нормальное значение</h2>
-        <p>Для каждого показателя может быть задано только одно нормальное значение</p>
-      </div>
-
-      <div class="controls">
-        <select v-model="selectedIndicatorId" class="select-input" @change="loadData">
-          <option disabled value="">Выберите показатель</option>
-          <option v-for="item in indicators" :key="item.id" :value="item.id">
-            {{ item.name }}
-          </option>
-        </select>
+        <h2>Нормальные значения</h2>
+        <p>Заполните нормальное значение для каждого показателя. Значение должно входить в заданное возможное значение показателя.</p>
       </div>
 
       <div v-if="message" class="success-message">{{ message }}</div>
       <div v-if="error" class="error-message">{{ error }}</div>
 
-      <div class="dual-layout">
-        <div class="list-card">
-          <div class="list-title">Возможные значения</div>
-
-          <div
-            v-for="item in possibleValues"
-            :key="item.id"
-            class="list-item"
-            :class="{ active: selectedPossibleId === item.id }"
-            @click="selectedPossibleId = item.id"
-          >
-            {{ item.value_text }}
+      <div class="rows-list">
+        <div
+          v-for="row in rows"
+          :key="row.indicator_id"
+          class="row-card"
+          :class="{ invalid: (row.touched || submitted) && !validateRow(row).valid }"
+        >
+          <div class="row-title">
+            <div>
+              <span>{{ row.indicator_name }}</span>
+              <div class="possible-line">
+                Возможные значения:
+                <b>{{ possibleValuesText(row) }}</b>
+              </div>
+            </div>
+            <span class="row-type">
+              {{ row.indicator_value_type === "numeric" ? "Только диапазон" : "Только текст" }}
+            </span>
           </div>
 
-          <div v-if="!possibleValues.length" class="empty-list">
-            Для показателя нет возможных значений
-          </div>
+          <ValueEditor
+            :model-value="row.editor"
+            :allow-empty="false"
+            :show-errors="row.touched || submitted"
+            :forced-mode="forcedModeFor(row)"
+            @update:modelValue="(value) => handleRowChange(row, value)"
+          />
         </div>
+      </div>
 
-        <div class="middle-actions">
-          <button
-            class="move-btn"
-            :disabled="!selectedPossibleId || !!normalValue"
-            @click="handleSetNormal"
-          >
-            →
-          </button>
-
-          <button
-            class="move-btn"
-            :disabled="!normalValue"
-            @click="handleRemoveNormal"
-          >
-            ←
-          </button>
-        </div>
-
-        <div class="list-card">
-          <div class="list-title">Нормальное значение</div>
-
-          <div
-            v-if="normalValue"
-            class="list-item active"
-            @click="selectedNormalId = normalValue.id"
-          >
-            {{ normalValue.value_text }}
-          </div>
-
-          <div v-else class="empty-list">
-            Нормальное значение не задано
-          </div>
-        </div>
+      <div class="save-row">
+        <button class="primary-btn" @click="handleSave">
+          Сохранить нормальные значения
+        </button>
       </div>
     </section>
 
     <aside class="card side-card">
-      <h3>Контекст</h3>
+      <h3>Подсказка</h3>
 
-      <div class="info-block">
-        <div class="label">Текущий показатель</div>
-        <div class="value">{{ selectedIndicatorName || "Не выбран" }}</div>
+      <div class="hint-block">
+        <div class="hint-title">Числовые показатели</div>
+        <div class="hint-text">Для них вводится диапазон, например [0;30]</div>
       </div>
 
-      <div class="info-block">
-        <div class="label">Возможных значений</div>
-        <div class="value">{{ possibleValues.length }}</div>
+      <div class="hint-block">
+        <div class="hint-title">Категориальные показатели</div>
+        <div class="hint-text">Для них вводится текстовое значение</div>
       </div>
 
-      <div class="info-block">
-        <div class="label">Нормальное значение</div>
-        <div class="value">{{ normalValue ? "Задано" : "Не задано" }}</div>
+      <div class="hint-block">
+        <div class="hint-title">Ограничение</div>
+        <div class="hint-text">Нормальное значение должно входить в возможное значение показателя</div>
       </div>
     </aside>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { onMounted, ref } from "vue";
+import ValueEditor from "../../components/ValueEditor.vue";
+import { getAllNormalValues, saveNormalValues } from "../../api/knowledge";
 import {
-  createNormalValue,
-  deleteNormalValue,
-  getIndicators,
-  getNormalValues,
-  getPossibleValues,
-} from "../../api/knowledge";
+  parseValueText,
+  formatValueEditor,
+  validateValueEditor,
+} from "../../utils/valueEditor";
 
-const indicators = ref([]);
-const selectedIndicatorId = ref("");
-const possibleValues = ref([]);
-const normalValues = ref([]);
-
-const selectedPossibleId = ref(null);
-const selectedNormalId = ref(null);
-
+const rows = ref([]);
 const message = ref("");
 const error = ref("");
+const submitted = ref(false);
 
 const clearMessages = () => {
   message.value = "";
   error.value = "";
 };
 
-const selectedIndicatorName = computed(() => {
-  return indicators.value.find((x) => x.id === selectedIndicatorId.value)?.name || "";
-});
+const forcedModeFor = (row) => {
+  if (row.indicator_value_type === "numeric") return "range";
+  if (row.indicator_value_type === "categorical") return "scalar";
+  return null;
+};
 
-const normalValue = computed(() => {
-  return normalValues.value.length ? normalValues.value[0] : null;
-});
+const getPossibleValues = (row) => {
+  if (Array.isArray(row.possible_values)) {
+    return row.possible_values;
+  }
 
-const loadIndicatorsData = async () => {
+  if (row.possible_value_text) {
+    return row.possible_value_text
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+const possibleValuesText = (row) => {
+  const values = getPossibleValues(row);
+
+  if (!values.length) {
+    return "не заданы";
+  }
+
+  return values.join(", ");
+};
+
+const loadRows = async () => {
+  clearMessages();
+  submitted.value = false;
+
   try {
-    indicators.value = await getIndicators();
+    const data = await getAllNormalValues();
+    rows.value = (data.rows || []).map((row) => ({
+      ...row,
+      editor: parseValueText(row.value_text),
+      touched: false,
+    }));
   } catch (err) {
     console.error(err);
-    error.value = "Не удалось загрузить показатели.";
+    error.value = "Не удалось загрузить нормальные значения.";
   }
 };
 
-const loadData = async () => {
-  clearMessages();
-
-  if (!selectedIndicatorId.value) {
-    possibleValues.value = [];
-    normalValues.value = [];
-    selectedPossibleId.value = null;
-    selectedNormalId.value = null;
-    return;
-  }
-
-  try {
-    possibleValues.value = await getPossibleValues(selectedIndicatorId.value);
-    normalValues.value = await getNormalValues(selectedIndicatorId.value);
-    selectedPossibleId.value = null;
-    selectedNormalId.value = normalValue.value?.id || null;
-  } catch (err) {
-    console.error(err);
-    error.value = "Не удалось загрузить значения.";
-  }
+const handleRowChange = (row, value) => {
+  row.editor = value;
+  row.touched = true;
 };
 
-const handleSetNormal = async () => {
-  clearMessages();
-
-  if (!selectedIndicatorId.value) {
-    error.value = "Сначала выберите показатель.";
-    return;
-  }
-
-  if (!selectedPossibleId.value) {
-    error.value = "Выберите возможное значение.";
-    return;
-  }
-
-  if (normalValue.value) {
-    error.value = "Для этого показателя уже задано нормальное значение.";
-    return;
-  }
-
-  const source = possibleValues.value.find((x) => x.id === selectedPossibleId.value);
-  if (!source) {
-    error.value = "Не удалось определить выбранное значение.";
-    return;
-  }
-
-  try {
-    await createNormalValue(selectedIndicatorId.value, source.value_text);
-    message.value = "Нормальное значение установлено.";
-    await loadData();
-  } catch (err) {
-    console.error(err);
-    error.value =
-      err?.response?.data?.detail || "Не удалось установить нормальное значение.";
-  }
+const validateRow = (row) => {
+  return validateValueEditor(row.editor, { allowEmpty: false });
 };
 
-const handleRemoveNormal = async () => {
+const handleSave = async () => {
   clearMessages();
+  submitted.value = true;
 
-  if (!normalValue.value) {
-    error.value = "Нормальное значение не выбрано.";
+  const rowWithoutPossibleValue = rows.value.find(
+    (row) => !getPossibleValues(row).length
+  );
+
+  if (rowWithoutPossibleValue) {
+    error.value = `Сначала задайте возможное значение для показателя: ${rowWithoutPossibleValue.indicator_name}`;
+    return;
+  }
+
+  const invalidRow = rows.value.find((row) => !validateRow(row).valid);
+
+  if (invalidRow) {
+    error.value = `Исправьте неверное нормальное значение для показателя: ${invalidRow.indicator_name}`;
     return;
   }
 
   try {
-    await deleteNormalValue(normalValue.value.id);
-    message.value = "Нормальное значение удалено.";
-    await loadData();
+    await saveNormalValues(
+      rows.value.map((row) => ({
+        indicator_id: row.indicator_id,
+        value_text: formatValueEditor(row.editor),
+      }))
+    );
+
+    message.value = "Нормальные значения сохранены.";
+    submitted.value = false;
+    await loadRows();
   } catch (err) {
     console.error(err);
-    error.value =
-      err?.response?.data?.detail || "Не удалось удалить нормальное значение.";
+    error.value = err?.response?.data?.detail || "Не удалось сохранить нормальные значения.";
   }
 };
 
 onMounted(async () => {
-  await loadIndicatorsData();
+  await loadRows();
 });
 </script>
 
@@ -224,119 +192,133 @@ onMounted(async () => {
   grid-template-columns: 1.5fr 0.8fr;
   gap: 20px;
 }
+
 .card {
   background: white;
   border-radius: 22px;
   padding: 24px;
   box-shadow: 0 14px 30px rgba(15, 23, 42, 0.06);
-  border: 1px solid #e2e8f0;
 }
+
 .card-header h2 {
-  margin: 0;
+  margin: 0 0 8px;
   font-size: 24px;
-  color: #0f172a;
 }
+
 .card-header p {
-  margin: 8px 0 0 0;
+  margin: 0 0 18px;
   color: #64748b;
 }
-.controls {
-  margin: 20px 0 16px 0;
-}
-.select-input {
-  width: 100%;
-  min-height: 46px;
-  border: 1px solid #cbd5e1;
-  border-radius: 14px;
-  padding: 0 14px;
-  font-size: 15px;
-}
-.success-message {
-  margin-bottom: 14px;
-  color: #0f766e;
-  font-weight: 700;
-}
+
+.success-message,
 .error-message {
   margin-bottom: 14px;
-  color: #dc2626;
-  font-weight: 700;
+  border-radius: 14px;
+  padding: 12px 14px;
+  font-size: 14px;
 }
-.dual-layout {
+
+.success-message {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.error-message {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.rows-list {
   display: grid;
-  grid-template-columns: 1fr 80px 1fr;
-  gap: 18px;
-  align-items: stretch;
+  gap: 14px;
 }
-.list-card {
+
+.row-card {
   border: 1px solid #e2e8f0;
   border-radius: 18px;
-  overflow: hidden;
-  min-height: 360px;
-}
-.list-title {
+  padding: 16px;
   background: #f8fafc;
-  padding: 14px 16px;
-  font-weight: 800;
-  border-bottom: 1px solid #e2e8f0;
 }
-.list-item {
-  padding: 14px 16px;
-  border-bottom: 1px solid #eef2f7;
-  cursor: pointer;
+
+.row-card.invalid {
+  border-color: #ef4444;
+  background: #fff7f7;
 }
-.list-item.active {
-  background: #eff6ff;
-  color: #0f172a;
+
+.row-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
   font-weight: 700;
 }
-.empty-list {
-  padding: 16px;
-  color: #64748b;
+
+.row-type {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 12px;
+  font-weight: 700;
 }
-.middle-actions {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 12px;
-}
-.move-btn {
-  min-height: 48px;
-  border: none;
-  border-radius: 14px;
-  background: #e2e8f0;
-  font-size: 22px;
-  cursor: pointer;
-  font-weight: 800;
-}
-.move-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.side-card h3 {
-  margin-top: 0;
-}
-.info-block {
-  margin-bottom: 22px;
-}
-.label {
+
+.possible-line {
+  margin-top: 6px;
   color: #64748b;
   font-size: 13px;
+  font-weight: 400;
+}
+
+.possible-line b {
+  color: #334155;
+}
+
+.save-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.primary-btn {
+  border: 0;
+  border-radius: 14px;
+  padding: 12px 18px;
+  background: #2563eb;
+  color: white;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.primary-btn:hover {
+  background: #1d4ed8;
+}
+
+.side-card h3 {
+  margin: 0 0 16px;
+}
+
+.hint-block {
+  padding: 14px;
+  border-radius: 16px;
+  background: #f8fafc;
+  margin-bottom: 12px;
+}
+
+.hint-title {
+  font-weight: 700;
   margin-bottom: 6px;
 }
-.value {
-  color: #0f172a;
-  font-weight: 800;
-  font-size: 18px;
+
+.hint-text {
+  color: #64748b;
+  font-size: 14px;
 }
+
 @media (max-width: 980px) {
   .page-grid {
     grid-template-columns: 1fr;
-  }
-  .dual-layout {
-    grid-template-columns: 1fr;
-  }
-  .middle-actions {
-    flex-direction: row;
   }
 }
 </style>

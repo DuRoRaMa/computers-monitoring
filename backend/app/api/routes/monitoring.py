@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.ml.inference import predict_state
+from app.models.indicator import Indicator
+from app.models.possible_value import PossibleValue
 from app.schemas.monitoring import MonitoringInput
 from app.services.expert_solver import ExpertSolver
 
@@ -17,6 +19,16 @@ MONITORING_KEYS = [
     "network_bandwidth",
     "process_count",
     "service_state",
+]
+
+NUMERIC_MONITORING_KEYS = [
+    "cpu_load",
+    "ram_usage",
+    "cpu_temp",
+    "disk_speed",
+    "disk_fill",
+    "network_bandwidth",
+    "process_count",
 ]
 
 MISSING_LABELS = {
@@ -50,19 +62,159 @@ def _missing_indicators(data: MonitoringInput) -> list[str]:
     return [MISSING_LABELS[key] for key in MONITORING_KEYS if getattr(data, key) is None]
 
 
+def _normalize_monitoring_value(key: str, value):
+    if value is None:
+        return None
+
+    if key in NUMERIC_MONITORING_KEYS:
+        return int(value)
+
+    return value
+
+
 def _resolved_expert_payload(data: MonitoringInput) -> dict:
     payload = {"previous_state": data.previous_state}
     for key in MONITORING_KEYS:
         value = getattr(data, key)
-        payload[key] = DEFAULTS[key] if value is None else value
+        payload[key] = DEFAULTS[key] if value is None else _normalize_monitoring_value(key, value)
     return payload
 
 
 def _raw_payload(data: MonitoringInput) -> dict:
     payload = {"previous_state": data.previous_state}
     for key in MONITORING_KEYS:
-        payload[key] = getattr(data, key)
+        payload[key] = _normalize_monitoring_value(key, getattr(data, key))
     return payload
+
+
+def _float_to_text(value: float | None) -> str:
+    if value is None:
+        return ""
+
+    if float(value).is_integer():
+        return str(int(value))
+
+    return str(value)
+
+
+def _format_possible_value(value: PossibleValue) -> str:
+    if value.value_kind == "scalar":
+        return value.scalar_value or ""
+
+    left = "[" if value.min_inclusive else "("
+    right = "]" if value.max_inclusive else ")"
+
+    return f"{left}{_float_to_text(value.min_value)};{_float_to_text(value.max_value)}{right}"
+
+
+def _number_in_possible_range(number: float, possible_value: PossibleValue) -> bool:
+    if possible_value.value_kind != "range":
+        return False
+
+    if possible_value.min_value is None or possible_value.max_value is None:
+        return False
+
+    left_ok = (
+        number >= possible_value.min_value
+        if possible_value.min_inclusive
+        else number > possible_value.min_value
+    )
+
+    right_ok = (
+        number <= possible_value.max_value
+        if possible_value.max_inclusive
+        else number < possible_value.max_value
+    )
+
+    return left_ok and right_ok
+
+
+def _scalar_in_possible_values(value: str, possible_value: PossibleValue) -> bool:
+    if possible_value.value_kind != "scalar":
+        return False
+
+    return str(value).strip() == str(possible_value.scalar_value).strip()
+
+
+def _validate_numeric_monitoring_value(indicator_name: str, value) -> int:
+    if isinstance(value, bool):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Значение показателя «{indicator_name}» должно быть целым числом",
+        )
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Значение показателя «{indicator_name}» должно быть целым числом",
+        )
+
+    if not numeric_value.is_integer():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Значение показателя «{indicator_name}» должно быть целым числом",
+        )
+
+    return int(numeric_value)
+
+
+def _validate_monitoring_input_by_possible_values(data: MonitoringInput, db: Session) -> None:
+    for field_name in MONITORING_KEYS:
+        value = getattr(data, field_name)
+
+        if value is None:
+            continue
+
+        indicator_name = MISSING_LABELS[field_name]
+
+        indicator = (
+            db.query(Indicator)
+            .filter(Indicator.name == indicator_name)
+            .first()
+        )
+
+        if not indicator:
+            raise HTTPException(
+                status_code=400,
+                detail=f"В базе знаний не найден показатель «{indicator_name}»",
+            )
+
+        possible_values = (
+            db.query(PossibleValue)
+            .filter(PossibleValue.indicator_id == indicator.id)
+            .order_by(PossibleValue.id)
+            .all()
+        )
+
+        if not possible_values:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Для показателя «{indicator_name}» сначала задайте возможное значение",
+            )
+
+        if indicator.value_type == "numeric":
+            numeric_value = _validate_numeric_monitoring_value(indicator_name, value)
+            is_valid = any(
+                _number_in_possible_range(numeric_value, possible_value)
+                for possible_value in possible_values
+            )
+        else:
+            is_valid = any(
+                _scalar_in_possible_values(str(value), possible_value)
+                for possible_value in possible_values
+            )
+
+        if not is_valid:
+            allowed_values = ", ".join(_format_possible_value(row) for row in possible_values)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Значение показателя «{indicator_name}» должно входить "
+                    f"в возможное значение: {allowed_values}"
+                ),
+            )
 
 
 @router.post("/evaluate")
@@ -74,6 +226,8 @@ def evaluate_monitoring(data: MonitoringInput, db: Session = Depends(get_db)):
             status_code=400,
             detail="Нужно ввести хотя бы один показатель для анализа",
         )
+
+    _validate_monitoring_input_by_possible_values(data, db)
 
     solver = ExpertSolver(db)
 
